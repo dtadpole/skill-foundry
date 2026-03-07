@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from tools.topics.models import Topic, TopicStatus, TopicEvent
-from tools.topics.manager import TopicManager
+from tools.topic_tracker.models import Topic, TopicStatus, TopicEvent
+from tools.topic_tracker.manager import TopicManager
 
 
 # ---------------------------------------------------------------
