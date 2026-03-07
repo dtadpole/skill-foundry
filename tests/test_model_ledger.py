@@ -1,4 +1,4 @@
-"""Tests for the llm_audit tool."""
+"""Tests for the model_ledger tool."""
 
 import json
 import os
@@ -7,28 +7,28 @@ from pathlib import Path
 
 import pytest
 
-from tools.llm_audit.record import AuditRecord
-from tools.llm_audit.pricing import estimate_cost, PRICING
-from tools.llm_audit.reader import read_log, filter_records, summarize
-from tools.llm_audit.logger import AuditLogger
+from tools.model_ledger.record import ModelLedgerRecord
+from tools.model_ledger.pricing import estimate_cost, PRICING
+from tools.model_ledger.reader import read_log, filter_records, summarize
+from tools.model_ledger.logger import ModelLedger
 
 
 # ---------------------------------------------------------------
-# AuditRecord serialization / deserialization
+# ModelLedgerRecord serialization / deserialization
 # ---------------------------------------------------------------
 
-class TestAuditRecord:
+class TestModelLedgerRecord:
     def test_round_trip_defaults(self):
         """A default record survives a JSONL round-trip."""
-        original = AuditRecord()
+        original = ModelLedgerRecord()
         line = original.to_jsonl()
-        restored = AuditRecord.from_jsonl(line)
+        restored = ModelLedgerRecord.from_jsonl(line)
         assert restored.request_id == original.request_id
         assert restored.status == "success"
 
     def test_round_trip_full(self):
         """A fully-populated record survives a JSONL round-trip."""
-        original = AuditRecord(
+        original = ModelLedgerRecord(
             session_id="sess-1",
             caller="test-script",
             latency_ms=123.45,
@@ -52,7 +52,7 @@ class TestAuditRecord:
             status="success",
         )
         line = original.to_jsonl()
-        restored = AuditRecord.from_jsonl(line)
+        restored = ModelLedgerRecord.from_jsonl(line)
 
         assert restored.session_id == "sess-1"
         assert restored.model == "gpt-4o"
@@ -63,23 +63,23 @@ class TestAuditRecord:
         assert restored.extra_params == {"seed": 42}
 
     def test_to_jsonl_is_single_line(self):
-        record = AuditRecord(response="line1\nline2")
+        record = ModelLedgerRecord(response="line1\nline2")
         line = record.to_jsonl()
         assert "\n" not in line
 
     def test_to_jsonl_is_valid_json(self):
-        record = AuditRecord(model="gpt-4o", response="hello")
+        record = ModelLedgerRecord(model="gpt-4o", response="hello")
         parsed = json.loads(record.to_jsonl())
         assert parsed["model"] == "gpt-4o"
         assert parsed["response"] == "hello"
 
     def test_error_record(self):
-        record = AuditRecord(
+        record = ModelLedgerRecord(
             status="error",
             error_type="APIError",
             error_message="rate limited",
         )
-        restored = AuditRecord.from_jsonl(record.to_jsonl())
+        restored = ModelLedgerRecord.from_jsonl(record.to_jsonl())
         assert restored.status == "error"
         assert restored.error_type == "APIError"
         assert restored.error_message == "rate limited"
@@ -122,21 +122,21 @@ class TestPricing:
 # Filter & Summarize
 # ---------------------------------------------------------------
 
-def _make_records() -> list[AuditRecord]:
+def _make_records() -> list[ModelLedgerRecord]:
     return [
-        AuditRecord(
+        ModelLedgerRecord(
             provider="openai", model="gpt-4o", status="success",
             latency_ms=100, prompt_tokens=500, completion_tokens=200,
             total_tokens=700, cost_usd=0.003,
             timestamp="2026-03-07T10:00:00+00:00",
         ),
-        AuditRecord(
+        ModelLedgerRecord(
             provider="openai", model="gpt-4o-mini", status="success",
             latency_ms=50, prompt_tokens=200, completion_tokens=100,
             total_tokens=300, cost_usd=0.0001,
             timestamp="2026-03-07T11:00:00+00:00",
         ),
-        AuditRecord(
+        ModelLedgerRecord(
             provider="anthropic", model="claude-sonnet-4-6", status="error",
             latency_ms=200, error_type="APIError", error_message="timeout",
             timestamp="2026-03-07T12:00:00+00:00",
@@ -198,13 +198,13 @@ class TestSummarize:
 
 
 # ---------------------------------------------------------------
-# AuditLogger JSONL writes
+# ModelLedger JSONL writes
 # ---------------------------------------------------------------
 
-class TestAuditLogger:
+class TestModelLedger:
     def test_log_creates_file(self, tmp_path):
-        logger = AuditLogger(log_dir=tmp_path, session_id="s1", caller="test")
-        record = AuditRecord(provider="openai", model="gpt-4o", response="hi")
+        logger = ModelLedger(log_dir=tmp_path, session_id="s1", caller="test")
+        record = ModelLedgerRecord(provider="openai", model="gpt-4o", response="hi")
         logger.log(record)
 
         files = list(tmp_path.glob("llm_*.jsonl"))
@@ -213,23 +213,23 @@ class TestAuditLogger:
         content = files[0].read_text()
         lines = [l for l in content.strip().split("\n") if l]
         assert len(lines) == 1
-        restored = AuditRecord.from_jsonl(lines[0])
+        restored = ModelLedgerRecord.from_jsonl(lines[0])
         assert restored.model == "gpt-4o"
         assert restored.response == "hi"
 
     def test_log_appends(self, tmp_path):
-        logger = AuditLogger(log_dir=tmp_path)
-        logger.log(AuditRecord(model="a"))
-        logger.log(AuditRecord(model="b"))
+        logger = ModelLedger(log_dir=tmp_path)
+        logger.log(ModelLedgerRecord(model="a"))
+        logger.log(ModelLedgerRecord(model="b"))
 
         files = list(tmp_path.glob("llm_*.jsonl"))
         lines = [l for l in files[0].read_text().strip().split("\n") if l]
         assert len(lines) == 2
 
     def test_read_log_with_path(self, tmp_path):
-        logger = AuditLogger(log_dir=tmp_path)
-        logger.log(AuditRecord(model="gpt-4o", provider="openai"))
-        logger.log(AuditRecord(model="claude-sonnet-4-6", provider="anthropic"))
+        logger = ModelLedger(log_dir=tmp_path)
+        logger.log(ModelLedgerRecord(model="gpt-4o", provider="openai"))
+        logger.log(ModelLedgerRecord(model="claude-sonnet-4-6", provider="anthropic"))
 
         log_file = list(tmp_path.glob("llm_*.jsonl"))[0]
         records = read_log(path=str(log_file))

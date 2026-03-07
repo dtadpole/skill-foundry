@@ -1,4 +1,4 @@
-"""Core AuditLogger — writes AuditRecords to JSONL and wraps LLM clients."""
+"""Core ModelLedger — writes ModelLedgerRecords to JSONL and wraps LLM clients."""
 
 from __future__ import annotations
 
@@ -10,14 +10,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from .record import AuditRecord
+from .record import ModelLedgerRecord
 from .pricing import estimate_cost
 
 _DEFAULT_DIR = Path.home() / ".skillfoundry" / "audit"
 
 
-class AuditLogger:
-    """Thread-safe logger that appends AuditRecords to daily JSONL files.
+class ModelLedger:
+    """Thread-safe logger that appends ModelLedgerRecords to daily JSONL files.
 
     Args:
         log_dir: Directory for log files. Defaults to ~/.skillfoundry/audit/
@@ -41,8 +41,8 @@ class AuditLogger:
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         return self.log_dir / f"llm_{today}.jsonl"
 
-    def log(self, record: AuditRecord) -> None:
-        """Append a single AuditRecord to today's JSONL log file."""
+    def log(self, record: ModelLedgerRecord) -> None:
+        """Append a single ModelLedgerRecord to today's JSONL log file."""
         path = self._log_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         line = record.to_jsonl() + "\n"
@@ -190,8 +190,8 @@ def _build_openai_record(
     response: Any,
     latency_ms: float,
     error_info: dict,
-    logger: AuditLogger,
-) -> AuditRecord:
+    logger: ModelLedger,
+) -> ModelLedgerRecord:
     model = kwargs.get("model", "")
     messages = kwargs.get("messages", [])
 
@@ -232,7 +232,7 @@ def _build_openai_record(
     if prompt_tokens is not None and completion_tokens is not None:
         cost = estimate_cost(model, prompt_tokens, completion_tokens)
 
-    return AuditRecord(
+    return ModelLedgerRecord(
         request_id=str(uuid.uuid4()),
         session_id=logger.session_id,
         caller=logger.caller,
@@ -261,8 +261,8 @@ def _build_anthropic_record(
     response: Any,
     latency_ms: float,
     error_info: dict,
-    logger: AuditLogger,
-) -> AuditRecord:
+    logger: ModelLedger,
+) -> ModelLedgerRecord:
     model = kwargs.get("model", "")
     messages = kwargs.get("messages", [])
     system_prompt = kwargs.get("system")
@@ -301,7 +301,7 @@ def _build_anthropic_record(
     if prompt_tokens is not None and completion_tokens is not None:
         cost = estimate_cost(model, prompt_tokens, completion_tokens)
 
-    return AuditRecord(
+    return ModelLedgerRecord(
         request_id=str(uuid.uuid4()),
         session_id=logger.session_id,
         caller=logger.caller,

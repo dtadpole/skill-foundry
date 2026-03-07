@@ -10,7 +10,7 @@ from typing import Optional
 
 
 @dataclass
-class AuditRecord:
+class ModelLedgerRecord:
     """Structured record of a single LLM API call."""
 
     # Identity & Timing
@@ -52,7 +52,7 @@ class AuditRecord:
         return json.dumps(asdict(self), ensure_ascii=False, separators=(",", ":"))
 
     @classmethod
-    def from_jsonl(cls, line: str) -> AuditRecord:
-        """Deserialize a single JSON line into an AuditRecord."""
+    def from_jsonl(cls, line: str) -> ModelLedgerRecord:
+        """Deserialize a single JSON line into an ModelLedgerRecord."""
         data = json.loads(line.strip())
         return cls(**data)

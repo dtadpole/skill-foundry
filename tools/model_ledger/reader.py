@@ -6,15 +6,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from .record import AuditRecord
+from .record import ModelLedgerRecord
 
 _DEFAULT_DIR = Path.home() / ".skillfoundry" / "audit"
 
 
 def read_log(
     date: Optional[str] = None, path: Optional[str] = None
-) -> list[AuditRecord]:
-    """Read a day's audit log and return a list of AuditRecords.
+) -> list[ModelLedgerRecord]:
+    """Read a day's audit log and return a list of ModelLedgerRecords.
 
     Args:
         date: Date string in YYYY-MM-DD format. Defaults to today (UTC).
@@ -30,24 +30,24 @@ def read_log(
     if not log_path.exists():
         return []
 
-    records: list[AuditRecord] = []
+    records: list[ModelLedgerRecord] = []
     with open(log_path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line:
-                records.append(AuditRecord.from_jsonl(line))
+                records.append(ModelLedgerRecord.from_jsonl(line))
     return records
 
 
 def filter_records(
-    records: list[AuditRecord],
+    records: list[ModelLedgerRecord],
     *,
     provider: Optional[str] = None,
     model: Optional[str] = None,
     status: Optional[str] = None,
     since: Optional[str] = None,
-) -> list[AuditRecord]:
-    """Filter a list of AuditRecords by provider, model, status, or timestamp.
+) -> list[ModelLedgerRecord]:
+    """Filter a list of ModelLedgerRecords by provider, model, status, or timestamp.
 
     Args:
         records: List of records to filter.
@@ -68,8 +68,8 @@ def filter_records(
     return result
 
 
-def summarize(records: list[AuditRecord]) -> dict:
-    """Produce a summary dict from a list of AuditRecords.
+def summarize(records: list[ModelLedgerRecord]) -> dict:
+    """Produce a summary dict from a list of ModelLedgerRecords.
 
     Returns:
         Dict with keys: total_calls, total_prompt_tokens, total_completion_tokens,
