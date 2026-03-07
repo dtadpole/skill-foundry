@@ -78,9 +78,11 @@ class Topic:
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
     tags: list[str] = field(default_factory=list)
+    original_request: Optional[str] = None   # user's exact words when topic was created
     current_action: Optional[str] = None
     done: list[str] = field(default_factory=list)
     pending: list[str] = field(default_factory=list)
+    tool_calls: list[dict] = field(default_factory=list)  # all tool calls across this topic
     events: list[TopicEvent] = field(default_factory=list)
 
     # -- helpers ---------------------------------------------------------
@@ -130,6 +132,16 @@ class Topic:
         self.pending.append(action)
         self.add_event("pending_added", action)
 
+    def log_tool_call(self, tool_name: str, arguments: dict = None, result: str = None) -> None:
+        """Record a tool call made during this topic."""
+        entry = {"tool": tool_name, "timestamp": datetime.now(timezone.utc).isoformat()}
+        if arguments:
+            entry["arguments"] = arguments
+        if result:
+            entry["result"] = result
+        self.tool_calls.append(entry)
+        self.add_event("tool_called", f"Called tool: {tool_name}", metadata={"tool": tool_name})
+
     def resolve_pending(self, action: str) -> None:
         """Move an action from pending to done."""
         if action in self.pending:
@@ -148,9 +160,11 @@ class Topic:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "tags": self.tags,
+            "original_request": self.original_request,
             "current_action": self.current_action,
             "done": self.done,
             "pending": self.pending,
+            "tool_calls": self.tool_calls,
             "events": [e.to_dict() for e in self.events],
         }
 
@@ -164,9 +178,11 @@ class Topic:
             created_at=d["created_at"],
             updated_at=d["updated_at"],
             tags=d.get("tags", []),
+            original_request=d.get("original_request"),
             current_action=d.get("current_action"),
             done=d.get("done", []),
             pending=d.get("pending", []),
+            tool_calls=d.get("tool_calls", []),
             events=[TopicEvent.from_dict(e) for e in d.get("events", [])],
         )
 
