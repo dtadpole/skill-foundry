@@ -1,8 +1,8 @@
-"""Core ModelLedger — writes ModelLedgerRecords to JSONL and wraps LLM clients."""
+"""Core ModelLedger — session-based Markdown logger under ~/.blue_lantern/model_ledger/."""
 
 from __future__ import annotations
 
-import os
+import json
 import threading
 import time
 import uuid
@@ -10,45 +10,223 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from .record import ModelLedgerRecord
 from .pricing import estimate_cost
 
-_DEFAULT_DIR = Path.home() / ".skillfoundry" / "audit"
+_DEFAULT_DIR = Path.home() / ".blue_lantern" / "model_ledger"
+
+_ROLE_ICONS = {
+    "system": "🔧 System",
+    "user": "👤 User",
+    "assistant": "🤖 Assistant",
+}
 
 
 class ModelLedger:
-    """Thread-safe logger that appends ModelLedgerRecords to daily JSONL files.
+    """Session-based logger writing events to a per-session Markdown file.
+
+    Storage: ~/.blue_lantern/model_ledger/YYYY-MM-DD/{session_id}.md
+    Each file contains: session header, turn sections, session end.
+    All writes are append-only and immutable.
 
     Args:
-        log_dir: Directory for log files. Defaults to ~/.skillfoundry/audit/
-        session_id: Optional session identifier attached to every record.
-        caller: Optional caller name attached to every record.
+        session_id: Unique session ID. Auto-generated UUID4 if not provided.
+        model: Model name (e.g. "claude-sonnet-4-6").
+        provider: Provider name (e.g. "anthropic").
+        channel: Channel name (e.g. "bluebubbles").
+        host: Host name. Defaults to "Blue Lantern".
+        root_dir: Root directory. Defaults to ~/.blue_lantern/model_ledger/.
     """
 
     def __init__(
         self,
-        log_dir: str | Path | None = None,
         session_id: Optional[str] = None,
-        caller: Optional[str] = None,
+        model: Optional[str] = None,
+        provider: Optional[str] = None,
+        channel: Optional[str] = None,
+        host: str = "Blue Lantern",
+        root_dir: Optional[str | Path] = None,
     ) -> None:
-        self.log_dir = Path(log_dir) if log_dir else _DEFAULT_DIR
-        self.session_id = session_id
-        self.caller = caller
+        self._root_dir = Path(root_dir) if root_dir else _DEFAULT_DIR
+        self._session_id = session_id or str(uuid.uuid4())
+        self._model = model
+        self._provider = provider
+        self._channel = channel
+        self._host = host
         self._lock = threading.Lock()
+        self._turn_count = 0
+        self._total_input_tokens = 0
+        self._total_output_tokens = 0
 
-    def _log_path(self) -> Path:
-        """Return today's log file path."""
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        return self.log_dir / f"llm_{today}.jsonl"
+        now = datetime.now(timezone.utc)
+        self._started_at = now.isoformat()
 
-    def log(self, record: ModelLedgerRecord) -> None:
-        """Append a single ModelLedgerRecord to today's JSONL log file."""
-        path = self._log_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        line = record.to_jsonl() + "\n"
+        # Create date directory and session file
+        today = now.strftime("%Y-%m-%d")
+        self._date_dir = self._root_dir / today
+        self._file_path = self._date_dir / f"{self._session_id}.md"
+        self._date_dir.mkdir(parents=True, exist_ok=True)
+
+        # Write session header
+        header = "# ModelLedger Session\n\n"
+        header += "| Field    | Value |\n"
+        header += "|----------|-------|\n"
+        header += f"| ID       | {self._session_id} |\n"
+        header += f"| Started  | {self._started_at} |\n"
+        if self._model:
+            header += f"| Model    | {self._model} |\n"
+        if self._provider:
+            header += f"| Provider | {self._provider} |\n"
+        if self._channel:
+            header += f"| Channel  | {self._channel} |\n"
+        header += f"| Host     | {self._host} |\n"
+
+        self._append(header)
+
+    @property
+    def session_id(self) -> str:
+        return self._session_id
+
+    @property
+    def file_path(self) -> Path:
+        return self._file_path
+
+    def _append(self, text: str) -> None:
+        """Append text to the session file (append-only)."""
         with self._lock:
-            with open(path, "a", encoding="utf-8") as f:
-                f.write(line)
+            with open(self._file_path, "a", encoding="utf-8") as f:
+                f.write(text)
+
+    def log_turn(
+        self,
+        turn_number: Optional[int] = None,
+        messages: Optional[list[dict]] = None,
+        response: Optional[str] = None,
+        tool_calls: Optional[list[dict]] = None,
+        usage: Optional[dict] = None,
+        timestamp: Optional[str] = None,
+    ) -> None:
+        """Log a single LLM turn as a Markdown section.
+
+        Args:
+            turn_number: Turn number (auto-increments if not provided).
+            messages: List of message dicts [{role, content}, ...].
+            response: Assistant response text. If tool_calls are present,
+                      rendered as "Assistant (continued)" after tool results.
+            tool_calls: List of tool call dicts
+                        [{name, input, output, error}, ...].
+            usage: Dict {input_tokens, output_tokens}.
+            timestamp: ISO timestamp (defaults to now).
+        """
+        self._turn_count += 1
+        tn = turn_number if turn_number is not None else self._turn_count
+
+        if usage:
+            self._total_input_tokens += usage.get("input_tokens", 0)
+            self._total_output_tokens += usage.get("output_tokens", 0)
+
+        ts = timestamp or datetime.now(timezone.utc).isoformat()
+
+        section = f"\n---\n\n## Turn {tn} — {ts}\n"
+
+        # Render messages
+        if messages:
+            for msg in messages:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                icon = _ROLE_ICONS.get(role, role)
+                section += f"\n### {icon}\n\n"
+                if role == "system":
+                    section += _blockquote(content) + "\n"
+                else:
+                    section += f"{content}\n"
+
+        # Render tool calls
+        if tool_calls:
+            for i, tc in enumerate(tool_calls):
+                name = tc.get("name", "unknown")
+                tc_input = tc.get("input", {})
+                tc_output = tc.get("output")
+                tc_error = tc.get("error")
+
+                # Tool call header (numbered if multiple)
+                if len(tool_calls) > 1:
+                    section += f"\n### 🛠️ Tool Call {i + 1}: `{name}`\n"
+                else:
+                    section += f"\n### 🛠️ Tool Call: `{name}`\n"
+
+                # Input
+                section += "\n**Input:**\n"
+                section += "```json\n"
+                if isinstance(tc_input, dict):
+                    section += json.dumps(tc_input, ensure_ascii=False) + "\n"
+                else:
+                    section += str(tc_input) + "\n"
+                section += "```\n"
+
+                # Response or error
+                if tc_error:
+                    section += f"\n### ❌ Tool Error: `{name}`\n\n"
+                    section += f"```\n{tc_error}\n```\n"
+                elif tc_output is not None:
+                    section += f"\n### ↩️ Tool Response: `{name}`\n\n"
+                    section += f"```\n{tc_output}\n```\n"
+
+        # Render response (after tool calls if present)
+        if response is not None:
+            if tool_calls:
+                section += f"\n### 🤖 Assistant (continued)\n\n{response}\n"
+            else:
+                section += f"\n### 🤖 Assistant\n\n{response}\n"
+
+        self._append(section)
+
+    def close(
+        self,
+        summary: Optional[str] = None,
+        input_tokens: Optional[int] = None,
+        output_tokens: Optional[int] = None,
+    ) -> dict:
+        """Append Session End section to the Markdown file.
+
+        Args:
+            summary: Optional session summary.
+            input_tokens: Override total input tokens.
+            output_tokens: Override total output tokens.
+
+        Returns:
+            Dict with session end metadata.
+        """
+        ended_at = datetime.now(timezone.utc).isoformat()
+        in_tok = input_tokens if input_tokens is not None else self._total_input_tokens
+        out_tok = output_tokens if output_tokens is not None else self._total_output_tokens
+
+        cost = None
+        if self._model:
+            cost = estimate_cost(self._model, in_tok, out_tok)
+        cost_str = f"${cost:.4f}" if cost is not None else "N/A"
+
+        footer = "\n---\n\n## Session End\n\n"
+        footer += "| Field              | Value |\n"
+        footer += "|--------------------|-------|\n"
+        footer += f"| Ended              | {ended_at} |\n"
+        footer += f"| Total Turns        | {self._turn_count} |\n"
+        footer += f"| Input Tokens       | {in_tok:,} |\n"
+        footer += f"| Output Tokens      | {out_tok:,} |\n"
+        footer += f"| Estimated Cost     | {cost_str} |\n"
+        if summary:
+            footer += f"| Summary            | {summary} |\n"
+
+        self._append(footer)
+
+        return {
+            "session_id": self._session_id,
+            "ended_at": ended_at,
+            "total_turns": self._turn_count,
+            "input_tokens": in_tok,
+            "output_tokens": out_tok,
+            "estimated_cost": cost,
+            "summary": summary,
+        }
 
     # ------------------------------------------------------------------
     # OpenAI wrapper
@@ -75,27 +253,16 @@ class ModelLedger:
 
             def create(self, **kwargs: Any) -> Any:
                 start = time.perf_counter()
-                error_info: dict = {}
                 response_obj = None
                 try:
                     response_obj = self._real.create(**kwargs)
                 except Exception as exc:
-                    elapsed = (time.perf_counter() - start) * 1000
-                    error_info = {
-                        "status": "error",
-                        "error_type": type(exc).__name__,
-                        "error_message": str(exc),
-                    }
-                    record = _build_openai_record(
-                        kwargs, None, elapsed, error_info, logger
+                    logger.log_turn(
+                        messages=kwargs.get("messages", []),
+                        response=str(exc),
                     )
-                    logger.log(record)
                     raise
-                elapsed = (time.perf_counter() - start) * 1000
-                record = _build_openai_record(
-                    kwargs, response_obj, elapsed, error_info, logger
-                )
-                logger.log(record)
+                _log_openai_turn(kwargs, response_obj, logger)
                 return response_obj
 
             def __getattr__(self, name: str) -> Any:
@@ -144,28 +311,16 @@ class ModelLedger:
                 self._real = real_messages
 
             def create(self, **kwargs: Any) -> Any:
-                start = time.perf_counter()
-                error_info: dict = {}
                 response_obj = None
                 try:
                     response_obj = self._real.create(**kwargs)
                 except Exception as exc:
-                    elapsed = (time.perf_counter() - start) * 1000
-                    error_info = {
-                        "status": "error",
-                        "error_type": type(exc).__name__,
-                        "error_message": str(exc),
-                    }
-                    record = _build_anthropic_record(
-                        kwargs, None, elapsed, error_info, logger
+                    logger.log_turn(
+                        messages=kwargs.get("messages", []),
+                        response=str(exc),
                     )
-                    logger.log(record)
                     raise
-                elapsed = (time.perf_counter() - start) * 1000
-                record = _build_anthropic_record(
-                    kwargs, response_obj, elapsed, error_info, logger
-                )
-                logger.log(record)
+                _log_anthropic_turn(kwargs, response_obj, logger)
                 return response_obj
 
             def __getattr__(self, name: str) -> Any:
@@ -182,32 +337,23 @@ class ModelLedger:
 
 
 # ------------------------------------------------------------------
-# Helpers to build records from provider-specific shapes
+# Helpers
 # ------------------------------------------------------------------
 
-def _build_openai_record(
-    kwargs: dict,
-    response: Any,
-    latency_ms: float,
-    error_info: dict,
-    logger: ModelLedger,
-) -> ModelLedgerRecord:
-    model = kwargs.get("model", "")
-    messages = kwargs.get("messages", [])
+def _blockquote(text: str) -> str:
+    """Wrap text in Markdown blockquote."""
+    return "\n".join(f"> {line}" for line in text.split("\n"))
 
-    system_prompt = None
-    conversation: list[dict] = []
-    for msg in messages:
-        if msg.get("role") == "system":
-            system_prompt = msg.get("content", "")
-        else:
-            conversation.append({"role": msg.get("role"), "content": msg.get("content")})
+
+def _log_openai_turn(
+    kwargs: dict, response: Any, logger: ModelLedger
+) -> None:
+    """Build and log a turn from an OpenAI response."""
+    messages = kwargs.get("messages", [])
 
     response_text = ""
     tool_calls_list: list[dict] = []
-    prompt_tokens = None
-    completion_tokens = None
-    total_tokens = None
+    usage: dict = {}
 
     if response is not None:
         choice = response.choices[0] if response.choices else None
@@ -216,66 +362,34 @@ def _build_openai_record(
             if choice.message.tool_calls:
                 for tc in choice.message.tool_calls:
                     tool_calls_list.append(
-                        {"name": tc.function.name, "arguments": tc.function.arguments}
+                        {"name": tc.function.name, "input": tc.function.arguments}
                     )
         if response.usage:
-            prompt_tokens = response.usage.prompt_tokens
-            completion_tokens = response.usage.completion_tokens
-            total_tokens = response.usage.total_tokens
+            usage = {
+                "input_tokens": response.usage.prompt_tokens,
+                "output_tokens": response.usage.completion_tokens,
+            }
 
-    extra = {}
-    for k in ("frequency_penalty", "presence_penalty", "seed", "stop", "logprobs"):
-        if k in kwargs:
-            extra[k] = kwargs[k]
-
-    cost = None
-    if prompt_tokens is not None and completion_tokens is not None:
-        cost = estimate_cost(model, prompt_tokens, completion_tokens)
-
-    return ModelLedgerRecord(
-        request_id=str(uuid.uuid4()),
-        session_id=logger.session_id,
-        caller=logger.caller,
-        timestamp=datetime.now(timezone.utc).isoformat(),
-        latency_ms=round(latency_ms, 2),
-        provider="openai",
-        model=model,
-        temperature=kwargs.get("temperature"),
-        max_tokens=kwargs.get("max_tokens"),
-        top_p=kwargs.get("top_p"),
-        extra_params=extra,
-        system_prompt=system_prompt,
-        messages=conversation,
+    logger.log_turn(
+        messages=messages,
         response=response_text,
         tool_calls=tool_calls_list,
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        total_tokens=total_tokens,
-        cost_usd=cost,
-        **(error_info if error_info else {"status": "success"}),
+        usage=usage,
     )
 
 
-def _build_anthropic_record(
-    kwargs: dict,
-    response: Any,
-    latency_ms: float,
-    error_info: dict,
-    logger: ModelLedger,
-) -> ModelLedgerRecord:
-    model = kwargs.get("model", "")
+def _log_anthropic_turn(
+    kwargs: dict, response: Any, logger: ModelLedger
+) -> None:
+    """Build and log a turn from an Anthropic response."""
     messages = kwargs.get("messages", [])
-    system_prompt = kwargs.get("system")
-
-    conversation: list[dict] = []
-    for msg in messages:
-        conversation.append({"role": msg.get("role"), "content": msg.get("content")})
+    system = kwargs.get("system")
+    if system:
+        messages = [{"role": "system", "content": system}] + messages
 
     response_text = ""
     tool_calls_list: list[dict] = []
-    prompt_tokens = None
-    completion_tokens = None
-    total_tokens = None
+    usage: dict = {}
 
     if response is not None:
         text_parts = []
@@ -284,42 +398,18 @@ def _build_anthropic_record(
                 text_parts.append(block.text)
             elif block.type == "tool_use":
                 tool_calls_list.append(
-                    {"name": block.name, "arguments": block.input}
+                    {"name": block.name, "input": block.input}
                 )
         response_text = "\n".join(text_parts)
         if response.usage:
-            prompt_tokens = response.usage.input_tokens
-            completion_tokens = response.usage.output_tokens
-            total_tokens = (prompt_tokens or 0) + (completion_tokens or 0)
+            usage = {
+                "input_tokens": response.usage.input_tokens,
+                "output_tokens": response.usage.output_tokens,
+            }
 
-    extra = {}
-    for k in ("stop_sequences", "metadata"):
-        if k in kwargs:
-            extra[k] = kwargs[k]
-
-    cost = None
-    if prompt_tokens is not None and completion_tokens is not None:
-        cost = estimate_cost(model, prompt_tokens, completion_tokens)
-
-    return ModelLedgerRecord(
-        request_id=str(uuid.uuid4()),
-        session_id=logger.session_id,
-        caller=logger.caller,
-        timestamp=datetime.now(timezone.utc).isoformat(),
-        latency_ms=round(latency_ms, 2),
-        provider="anthropic",
-        model=model,
-        temperature=kwargs.get("temperature"),
-        max_tokens=kwargs.get("max_tokens"),
-        top_p=kwargs.get("top_p"),
-        extra_params=extra,
-        system_prompt=system_prompt,
-        messages=conversation,
+    logger.log_turn(
+        messages=messages,
         response=response_text,
         tool_calls=tool_calls_list,
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        total_tokens=total_tokens,
-        cost_usd=cost,
-        **(error_info if error_info else {"status": "success"}),
+        usage=usage,
     )

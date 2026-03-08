@@ -125,108 +125,90 @@ class TestConversationRecord:
 
 
 # ---------------------------------------------------------------
-# UserLedger — message logging
+# UserLedger — Markdown message logging
 # ---------------------------------------------------------------
 
 class TestUserLedger:
     def test_log_message_creates_file(self, tmp_path):
-        """Logging a message creates a JSONL file with the record."""
-        ledger = UserLedger(channel="cli", log_dir=tmp_path)
+        """Logging a message creates a Markdown file with the content."""
+        ledger = UserLedger(channel="cli", root_dir=tmp_path)
         rec = ledger.log_message("user", "hello there")
 
-        assert rec.role == "user"
-        assert rec.content == "hello there"
-        assert rec.channel == "cli"
+        assert rec["role"] == "user"
+        assert rec["content"] == "hello there"
 
-        files = list(tmp_path.glob("**/*.jsonl"))
+        files = list(tmp_path.glob("**/*.md"))
         assert len(files) == 1
         content = files[0].read_text()
-        lines = [l for l in content.strip().split("\n") if l]
-        assert len(lines) == 1
-        restored = MessageRecord.from_jsonl(lines[0])
-        assert restored.content == "hello there"
+        assert "hello there" in content
 
     def test_log_message_appends(self, tmp_path):
-        """Multiple messages append to the same daily file."""
-        ledger = UserLedger(log_dir=tmp_path)
+        """Multiple messages append to the same Markdown file."""
+        ledger = UserLedger(root_dir=tmp_path)
         ledger.log_message("user", "msg1")
         ledger.log_message("assistant", "msg2")
         ledger.log_message("user", "msg3")
 
-        files = list(tmp_path.glob("**/*.jsonl"))
-        lines = [l for l in files[0].read_text().strip().split("\n") if l]
-        assert len(lines) == 3
+        content = ledger._file_path.read_text()
+        assert "msg1" in content
+        assert "msg2" in content
+        assert "msg3" in content
 
     def test_log_message_with_attachments(self, tmp_path):
-        """Attachments are persisted correctly."""
-        ledger = UserLedger(log_dir=tmp_path)
+        """Attachments are recorded in the return dict."""
+        ledger = UserLedger(root_dir=tmp_path)
         rec = ledger.log_message(
             "user", "see this image",
             attachments=[{"type": "image", "name": "pic.png", "size_bytes": 2048}],
         )
-        assert len(rec.attachments) == 1
-        assert rec.attachments[0]["name"] == "pic.png"
+        assert len(rec["attachments"]) == 1
+        assert rec["attachments"][0]["name"] == "pic.png"
 
-    def test_session_tracking(self, tmp_path):
-        """get_session returns current conversation state."""
-        ledger = UserLedger(channel="telegram", user_name="Zhen", log_dir=tmp_path)
-        ledger.log_message("user", "hi", sender_name="Zhen")
-        ledger.log_message("assistant", "hello!")
+    def test_message_count(self, tmp_path):
+        """Message counter increments correctly."""
+        ledger = UserLedger(root_dir=tmp_path)
+        rec1 = ledger.log_message("user", "first")
+        rec2 = ledger.log_message("assistant", "second")
+        assert rec1["message_number"] == 1
+        assert rec2["message_number"] == 2
 
-        session = ledger.get_session()
-        assert session.channel == "telegram"
-        assert session.user_name == "Zhen"
-        assert len(session.messages) == 2
-        assert session.total_turns == 1
-
-    def test_turn_counting(self, tmp_path):
-        """total_turns counts user->assistant pairs."""
-        ledger = UserLedger(log_dir=tmp_path)
-        ledger.log_message("user", "q1")
-        ledger.log_message("assistant", "a1")
-        ledger.log_message("user", "q2")
-        ledger.log_message("assistant", "a2")
-        ledger.log_message("user", "q3")  # no response yet
-
-        session = ledger.get_session()
-        assert session.total_turns == 2
-
-    def test_close_writes_session(self, tmp_path):
-        """close() marks session ended and writes a session summary file."""
-        ledger = UserLedger(log_dir=tmp_path)
+    def test_close(self, tmp_path):
+        """close() appends Session End section and returns metadata."""
+        ledger = UserLedger(root_dir=tmp_path)
         ledger.log_message("user", "help me")
         ledger.log_message("assistant", "sure!")
 
-        conversation = ledger.close(summary="Quick help session")
+        result = ledger.close(summary="Quick help session")
+        assert result["ended_at"] is not None
+        assert result["summary"] == "Quick help session"
+        assert result["total_messages"] == 2
 
-        assert conversation.ended_at is not None
-        assert conversation.summary == "Quick help session"
-
-        # Session file should exist
-        session_files = list(tmp_path.glob("**/sessions/*.json"))
-        assert len(session_files) == 1
-
-        with open(session_files[0], "r") as f:
-            data = json.load(f)
-        assert data["summary"] == "Quick help session"
-        assert len(data["messages"]) == 2
+        content = ledger._file_path.read_text()
+        assert "## Session End" in content
+        assert "Quick help session" in content
 
     def test_close_produces_correct_record(self, tmp_path):
-        """close() returns a ConversationRecord with all fields set."""
+        """close() returns a dict with all session fields."""
         ledger = UserLedger(
-            channel="discord", user_id="u123", user_name="Zhen", log_dir=tmp_path,
+            channel="discord", user_id="u123", user_name="Zhen", root_dir=tmp_path,
         )
         ledger.log_message("user", "hey")
         ledger.log_message("assistant", "hi!")
-        conv = ledger.close(summary="Greeting")
+        rec = ledger.close(summary="Greeting")
 
-        assert conv.channel == "discord"
-        assert conv.user_id == "u123"
-        assert conv.user_name == "Zhen"
-        assert conv.total_turns == 1
-        assert conv.ended_at is not None
-        assert conv.summary == "Greeting"
-        assert len(conv.messages) == 2
+        assert rec["session_id"] == ledger.session_id
+        assert rec["ended_at"] is not None
+        assert rec["total_messages"] == 2
+        assert rec["summary"] == "Greeting"
+
+    def test_session_header_content(self, tmp_path):
+        """Session header contains metadata fields."""
+        ledger = UserLedger(
+            channel="telegram", user_name="Zhen", user_id="u1", root_dir=tmp_path,
+        )
+        content = ledger._file_path.read_text()
+        assert "telegram" in content
+        assert "Zhen" in content
 
 
 # ---------------------------------------------------------------
@@ -235,10 +217,10 @@ class TestUserLedger:
 
 def _setup_ledger(tmp_path: Path) -> UserLedger:
     """Helper: create a ledger, log some messages, and close it."""
-    ledger = UserLedger(channel="cli", user_name="Zhen", log_dir=tmp_path)
-    ledger.log_message("user", "What is Python?", sender_name="Zhen")
+    ledger = UserLedger(channel="cli", user_name="Zhen", root_dir=tmp_path)
+    ledger.log_message("user", "What is Python?")
     ledger.log_message("assistant", "Python is a programming language.")
-    ledger.log_message("user", "How do I install it?", sender_name="Zhen")
+    ledger.log_message("user", "How do I install it?")
     ledger.log_message("assistant", "Use your package manager or python.org.")
     ledger.close(summary="Python intro questions")
     return ledger
@@ -246,7 +228,7 @@ def _setup_ledger(tmp_path: Path) -> UserLedger:
 
 class TestReader:
     def test_read_messages(self, tmp_path):
-        """read_messages returns all messages from a daily file."""
+        """read_messages returns all messages from Markdown files."""
         _setup_ledger(tmp_path)
         messages = read_messages(log_dir=tmp_path)
         assert len(messages) == 4
@@ -255,11 +237,11 @@ class TestReader:
 
     def test_read_messages_filter_channel(self, tmp_path):
         """read_messages can filter by channel."""
-        ledger = UserLedger(channel="telegram", log_dir=tmp_path)
+        ledger = UserLedger(channel="telegram", root_dir=tmp_path)
         ledger.log_message("user", "tg message")
         ledger.close()
 
-        ledger2 = UserLedger(channel="discord", log_dir=tmp_path)
+        ledger2 = UserLedger(channel="discord", root_dir=tmp_path)
         ledger2.log_message("user", "dc message")
         ledger2.close()
 
@@ -270,7 +252,7 @@ class TestReader:
     def test_read_session(self, tmp_path):
         """read_session loads a full session by ID."""
         ledger = _setup_ledger(tmp_path)
-        session_id = ledger.get_session().session_id
+        session_id = ledger.session_id
 
         session = read_session(session_id, log_dir=tmp_path)
         assert session is not None

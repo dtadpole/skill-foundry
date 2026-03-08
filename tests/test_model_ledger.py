@@ -198,45 +198,195 @@ class TestSummarize:
 
 
 # ---------------------------------------------------------------
-# ModelLedger JSONL writes
+# ModelLedger — Markdown writes
 # ---------------------------------------------------------------
 
 class TestModelLedger:
-    def test_log_creates_file(self, tmp_path):
-        logger = ModelLedger(log_dir=tmp_path, session_id="s1", caller="test")
-        record = ModelLedgerRecord(provider="openai", model="gpt-4o", response="hi")
-        logger.log(record)
+    def test_creates_md_file(self, tmp_path):
+        """Logger creates a .md file with session header."""
+        logger = ModelLedger(
+            root_dir=tmp_path, session_id="s1",
+            model="gpt-4o", provider="openai",
+        )
+        logger.log_turn(
+            messages=[{"role": "user", "content": "hello"}],
+            response="hi there",
+        )
 
-        files = list(tmp_path.glob("llm_*.jsonl"))
+        files = list(tmp_path.glob("**/*.md"))
         assert len(files) == 1
-
         content = files[0].read_text()
-        lines = [l for l in content.strip().split("\n") if l]
-        assert len(lines) == 1
-        restored = ModelLedgerRecord.from_jsonl(lines[0])
-        assert restored.model == "gpt-4o"
-        assert restored.response == "hi"
+        assert "# ModelLedger Session" in content
+        assert "gpt-4o" in content
+        assert "hello" in content
+        assert "hi there" in content
 
-    def test_log_appends(self, tmp_path):
-        logger = ModelLedger(log_dir=tmp_path)
-        logger.log(ModelLedgerRecord(model="a"))
-        logger.log(ModelLedgerRecord(model="b"))
+    def test_appends_turns(self, tmp_path):
+        """Multiple log_turn calls append turn sections."""
+        logger = ModelLedger(root_dir=tmp_path)
+        logger.log_turn(
+            messages=[{"role": "user", "content": "q1"}],
+            response="a1",
+        )
+        logger.log_turn(
+            messages=[{"role": "user", "content": "q2"}],
+            response="a2",
+        )
 
-        files = list(tmp_path.glob("llm_*.jsonl"))
-        lines = [l for l in files[0].read_text().strip().split("\n") if l]
-        assert len(lines) == 2
+        content = logger.file_path.read_text()
+        assert "## Turn 1" in content
+        assert "## Turn 2" in content
+        assert "q1" in content
+        assert "a2" in content
+
+    def test_system_message_blockquoted(self, tmp_path):
+        """System messages are rendered as blockquotes."""
+        logger = ModelLedger(root_dir=tmp_path)
+        logger.log_turn(
+            messages=[
+                {"role": "system", "content": "You are helpful."},
+                {"role": "user", "content": "hi"},
+            ],
+            response="hello!",
+        )
+
+        content = logger.file_path.read_text()
+        assert "### 🔧 System" in content
+        assert "> You are helpful." in content
+
+    def test_tool_calls(self, tmp_path):
+        """Tool calls and responses are rendered correctly."""
+        logger = ModelLedger(root_dir=tmp_path)
+        logger.log_turn(
+            messages=[{"role": "user", "content": "run ls"}],
+            tool_calls=[{
+                "name": "exec",
+                "input": {"command": "ls"},
+                "output": "file1.py\nfile2.py",
+            }],
+            response="Here are the files.",
+        )
+
+        content = logger.file_path.read_text()
+        assert "🛠️ Tool Call: `exec`" in content
+        assert "↩️ Tool Response: `exec`" in content
+        assert "🤖 Assistant (continued)" in content
+        assert "Here are the files." in content
+
+    def test_tool_error(self, tmp_path):
+        """Tool errors are rendered with error icon."""
+        logger = ModelLedger(root_dir=tmp_path)
+        logger.log_turn(
+            messages=[{"role": "user", "content": "run bad"}],
+            tool_calls=[{
+                "name": "exec",
+                "input": {"command": "bad"},
+                "error": "command not found",
+            }],
+        )
+
+        content = logger.file_path.read_text()
+        assert "❌ Tool Error: `exec`" in content
+        assert "command not found" in content
+
+    def test_multiple_tool_calls_numbered(self, tmp_path):
+        """Multiple tool calls in one turn are numbered."""
+        logger = ModelLedger(root_dir=tmp_path)
+        logger.log_turn(
+            messages=[{"role": "user", "content": "do stuff"}],
+            tool_calls=[
+                {"name": "exec", "input": {"command": "ls"}},
+                {"name": "Read", "input": {"path": "foo.py"}},
+            ],
+        )
+
+        content = logger.file_path.read_text()
+        assert "Tool Call 1: `exec`" in content
+        assert "Tool Call 2: `Read`" in content
+
+    def test_close(self, tmp_path):
+        """close() appends Session End section."""
+        logger = ModelLedger(root_dir=tmp_path, model="gpt-4o")
+        logger.log_turn(
+            messages=[{"role": "user", "content": "hi"}],
+            response="hello",
+            usage={"input_tokens": 100, "output_tokens": 50},
+        )
+        result = logger.close(summary="Test session")
+
+        content = logger.file_path.read_text()
+        assert "## Session End" in content
+        assert "Test session" in content
+        assert "100" in content
+        assert "50" in content
+        assert result["total_turns"] == 1
+        assert result["summary"] == "Test session"
+
+    def test_close_with_override_tokens(self, tmp_path):
+        """close() can override token counts."""
+        logger = ModelLedger(root_dir=tmp_path, model="gpt-4o")
+        logger.log_turn(messages=[{"role": "user", "content": "x"}], response="y")
+        result = logger.close(input_tokens=999, output_tokens=111)
+        assert result["input_tokens"] == 999
+        assert result["output_tokens"] == 111
 
     def test_read_log_with_path(self, tmp_path):
-        logger = ModelLedger(log_dir=tmp_path)
-        logger.log(ModelLedgerRecord(model="gpt-4o", provider="openai"))
-        logger.log(ModelLedgerRecord(model="claude-sonnet-4-6", provider="anthropic"))
+        """read_log parses an MD file back into records."""
+        logger = ModelLedger(
+            root_dir=tmp_path, model="gpt-4o", provider="openai",
+        )
+        logger.log_turn(
+            messages=[{"role": "user", "content": "q1"}],
+            response="a1",
+        )
+        logger.log_turn(
+            messages=[{"role": "user", "content": "q2"}],
+            response="a2",
+        )
 
-        log_file = list(tmp_path.glob("llm_*.jsonl"))[0]
-        records = read_log(path=str(log_file))
+        records = read_log(path=str(logger.file_path))
         assert len(records) == 2
         assert records[0].model == "gpt-4o"
-        assert records[1].provider == "anthropic"
+        assert records[1].provider == "openai"
 
     def test_read_log_missing_file(self):
-        records = read_log(path="/tmp/nonexistent_audit_log.jsonl")
+        """read_log returns empty list for non-existent file."""
+        records = read_log(path="/tmp/nonexistent_audit_log.md")
         assert records == []
+
+    def test_read_log_with_tool_calls(self, tmp_path):
+        """read_log correctly parses tool calls from MD."""
+        logger = ModelLedger(root_dir=tmp_path, model="gpt-4o", provider="openai")
+        logger.log_turn(
+            messages=[{"role": "user", "content": "list files"}],
+            tool_calls=[{
+                "name": "exec",
+                "input": {"command": "ls"},
+                "output": "a.py\nb.py",
+            }],
+            response="Found 2 files.",
+        )
+
+        records = read_log(path=str(logger.file_path))
+        assert len(records) == 1
+        assert len(records[0].tool_calls) == 1
+        assert records[0].tool_calls[0]["name"] == "exec"
+        assert "list files" in records[0].messages[0]["content"]
+
+    def test_session_header_fields(self, tmp_path):
+        """Session header contains all provided metadata."""
+        logger = ModelLedger(
+            root_dir=tmp_path,
+            session_id="test-uuid",
+            model="claude-sonnet-4-6",
+            provider="anthropic",
+            channel="bluebubbles",
+            host="Test Host",
+        )
+
+        content = logger.file_path.read_text()
+        assert "test-uuid" in content
+        assert "claude-sonnet-4-6" in content
+        assert "anthropic" in content
+        assert "bluebubbles" in content
+        assert "Test Host" in content

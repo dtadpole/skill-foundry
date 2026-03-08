@@ -1,33 +1,38 @@
-"""Core UserLedger — logs user-agent conversations to JSONL files."""
+"""Core UserLedger — logs user-agent conversations to Markdown files."""
 
 from __future__ import annotations
 
-import json
 import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from .record import MessageRecord, ConversationRecord
+_DEFAULT_DIR = Path.home() / ".blue_lantern" / "user_ledger"
 
-_DEFAULT_DIR = Path.home() / ".skillfoundry" / "user_ledger"
+_ROLE_ICONS = {
+    "user": "👤 User",
+    "assistant": "🤖 Assistant",
+    "system": "⚙️ System",
+}
 
 
 class UserLedger:
-    """Thread-safe logger for user-agent conversations.
+    """Append-only Markdown logger for user-agent conversations.
 
-    Each message is immediately appended to a daily JSONL file.
-    When the session is closed, a full ConversationRecord is written
-    to a separate session summary file.
+    Each session produces one .md file at:
+        ~/.blue_lantern/user_ledger/YYYY-MM-DD/{session_id}.md
+
+    The file is written incrementally — header on init, each message
+    appended via log_message(), and a footer appended via close().
+    Once written, lines are never modified (immutable append-only).
 
     Args:
-        session_id: Unique session identifier. Auto-generated if not provided.
-        channel: Platform channel (e.g. "cli", "telegram", "discord").
+        session_id: Unique session ID. Auto-generated UUID4 if not provided.
+        channel: Platform channel (e.g. "bluebubbles", "telegram").
         user_id: Platform user ID.
         user_name: Display name.
-        log_dir: Root directory for logs. Defaults to ~/.skillfoundry/user_ledger/.
-            Files are organized into YYYY-MM subdirectories automatically.
+        root_dir: Root directory. Defaults to ~/.blue_lantern/user_ledger/.
     """
 
     def __init__(
@@ -36,111 +41,113 @@ class UserLedger:
         channel: Optional[str] = None,
         user_id: Optional[str] = None,
         user_name: Optional[str] = None,
-        log_dir: Optional[str | Path] = None,
+        root_dir: Optional[str | Path] = None,
     ) -> None:
         self._session_id = session_id or str(uuid.uuid4())
         self._channel = channel
         self._user_id = user_id
         self._user_name = user_name
         self._lock = threading.Lock()
-        self._root_dir = Path(log_dir) if log_dir is not None else _DEFAULT_DIR
+        self._root_dir = Path(root_dir) if root_dir is not None else _DEFAULT_DIR
+        self._message_count = 0
 
         now = datetime.now(timezone.utc)
-        self._conversation = ConversationRecord(
-            session_id=self._session_id,
-            started_at=now.isoformat(),
-            channel=self._channel,
-            user_id=self._user_id,
-            user_name=self._user_name,
-        )
+        self._started_at = now.isoformat()
 
-    def _month_dir(self) -> Path:
-        """Return the current month's subdirectory."""
-        return self._root_dir / datetime.now(timezone.utc).strftime("%Y-%m")
+        # Create date directory and session file
+        today = now.strftime("%Y-%m-%d")
+        self._date_dir = self._root_dir / today
+        self._file_path = self._date_dir / f"{self._session_id}.md"
+        self._date_dir.mkdir(parents=True, exist_ok=True)
 
-    def _daily_path(self) -> Path:
-        """Return today's message log file path."""
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        return self._month_dir() / f"{today}.jsonl"
+        # Write session header
+        header = f"# Session: {self._session_id}\n\n"
+        header += "| Field | Value |\n"
+        header += "|-------|-------|\n"
+        header += f"| Started | {self._started_at} |\n"
+        if self._channel:
+            header += f"| Channel | {self._channel} |\n"
+        if self._user_name or self._user_id:
+            user_display = self._user_name or ""
+            if self._user_id:
+                user_display += f" ({self._user_id})" if user_display else self._user_id
+            header += f"| User | {user_display} |\n"
+        header += "\n---\n\n## Messages\n"
 
-    def _session_path(self) -> Path:
-        """Return the session summary file path."""
-        return self._month_dir() / "sessions" / f"{self._session_id}.json"
+        with open(self._file_path, "a", encoding="utf-8") as f:
+            f.write(header)
+
+    @property
+    def session_id(self) -> str:
+        return self._session_id
 
     def log_message(
         self,
         role: str,
         content: str,
-        sender_id: Optional[str] = None,
-        sender_name: Optional[str] = None,
         attachments: Optional[list[dict]] = None,
-        metadata: Optional[dict] = None,
-    ) -> MessageRecord:
-        """Log a single message and append it to the daily JSONL file.
+    ) -> dict:
+        """Append a formatted message section to the session Markdown file.
 
         Args:
             role: Message role — "user", "assistant", or "system".
             content: Message text.
-            sender_id: Platform-specific sender ID.
-            sender_name: Human-readable sender name.
-            attachments: List of attachment dicts [{type, name, size_bytes}].
-            metadata: Extra platform-specific data.
+            attachments: Optional list of attachment dicts.
 
         Returns:
-            The created MessageRecord.
+            A dict with message metadata.
         """
-        record = MessageRecord(
-            role=role,
-            content=content,
-            channel=self._channel,
-            sender_id=sender_id,
-            sender_name=sender_name,
-            attachments=attachments or [],
-            metadata=metadata or {},
-        )
+        self._message_count += 1
+        timestamp = datetime.now(timezone.utc).isoformat()
+        role_display = _ROLE_ICONS.get(role, role)
+
+        section = f"\n### [{timestamp}] {role_display}\n{content}\n\n---\n"
+
+        if attachments:
+            att_lines = "\n".join(
+                f"- {a.get('name', 'file')} ({a.get('type', 'unknown')})"
+                for a in attachments
+            )
+            section = f"\n### [{timestamp}] {role_display}\n{content}\n\n**Attachments:**\n{att_lines}\n\n---\n"
 
         with self._lock:
-            self._conversation.messages.append(record)
-            # Count turns: a turn is a user message followed by an assistant message
-            roles = [m.role for m in self._conversation.messages]
-            turns = sum(
-                1 for i in range(len(roles) - 1)
-                if roles[i] == "user" and roles[i + 1] == "assistant"
-            )
-            self._conversation.total_turns = turns
+            with open(self._file_path, "a", encoding="utf-8") as f:
+                f.write(section)
 
-            path = self._daily_path()
-            path.parent.mkdir(parents=True, exist_ok=True)
-            line = record.to_jsonl() + "\n"
-            with open(path, "a", encoding="utf-8") as f:
-                f.write(line)
+        return {
+            "message_number": self._message_count,
+            "role": role,
+            "content": content,
+            "timestamp": timestamp,
+            "attachments": attachments or [],
+        }
 
-        return record
-
-    def close(self, summary: Optional[str] = None) -> ConversationRecord:
-        """Close the session and write a ConversationRecord summary.
+    def close(self, summary: Optional[str] = None) -> dict:
+        """Append the Session End section to the Markdown file.
 
         Args:
-            summary: Optional human/AI-generated summary of the conversation.
+            summary: Optional summary of the conversation.
 
         Returns:
-            The final ConversationRecord.
+            A dict with session end metadata.
         """
+        ended_at = datetime.now(timezone.utc).isoformat()
+
+        footer = "\n## Session End\n\n"
+        footer += "| Field | Value |\n"
+        footer += "|-------|-------|\n"
+        footer += f"| Ended | {ended_at} |\n"
+        footer += f"| Total Messages | {self._message_count} |\n"
+        if summary:
+            footer += f"| Summary | {summary} |\n"
+
         with self._lock:
-            self._conversation.ended_at = datetime.now(timezone.utc).isoformat()
-            self._conversation.summary = summary
+            with open(self._file_path, "a", encoding="utf-8") as f:
+                f.write(footer)
 
-            path = self._session_path()
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(self._conversation.to_dict(), f, ensure_ascii=False, indent=2)
-
-        return self._conversation
-
-    def get_session(self) -> ConversationRecord:
-        """Return the current session state.
-
-        Returns:
-            A snapshot of the current ConversationRecord.
-        """
-        return self._conversation
+        return {
+            "session_id": self._session_id,
+            "ended_at": ended_at,
+            "total_messages": self._message_count,
+            "summary": summary,
+        }

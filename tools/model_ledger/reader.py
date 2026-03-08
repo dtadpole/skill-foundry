@@ -1,20 +1,22 @@
-"""Reader utilities for querying and summarizing audit logs."""
+"""Reader utilities for querying and summarizing model ledger logs."""
 
 from __future__ import annotations
 
+import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 from .record import ModelLedgerRecord
 
-_DEFAULT_DIR = Path.home() / ".skillfoundry" / "audit"
+_DEFAULT_DIR = Path.home() / ".blue_lantern" / "model_ledger"
 
 
 def read_log(
     date: Optional[str] = None, path: Optional[str] = None
 ) -> list[ModelLedgerRecord]:
-    """Read a day's audit log and return a list of ModelLedgerRecords.
+    """Read audit log records and return a list of ModelLedgerRecords.
 
     Args:
         date: Date string in YYYY-MM-DD format. Defaults to today (UTC).
@@ -22,22 +24,150 @@ def read_log(
     """
     if path:
         log_path = Path(path)
-    else:
-        if date is None:
-            date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        log_path = _DEFAULT_DIR / f"llm_{date}.jsonl"
+        if not log_path.exists():
+            return []
+        return _read_md_file(log_path)
 
-    if not log_path.exists():
+    if date is None:
+        date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    date_dir = _DEFAULT_DIR / date
+    if not date_dir.exists():
         return []
 
     records: list[ModelLedgerRecord] = []
-    with open(log_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                records.append(ModelLedgerRecord.from_jsonl(line))
+    for md_file in sorted(date_dir.glob("*.md")):
+        records.extend(_read_md_file(md_file))
     return records
 
+
+# ------------------------------------------------------------------
+# Markdown parsing
+# ------------------------------------------------------------------
+
+def _extract_table_field(text: str, field: str) -> Optional[str]:
+    """Extract a value from a Markdown table row."""
+    m = re.search(rf"\|\s*{re.escape(field)}\s*\|\s*(.+?)\s*\|", text)
+    return m.group(1).strip() if m else None
+
+
+def _read_md_file(path: Path) -> list[ModelLedgerRecord]:
+    """Read a Markdown session file and return ModelLedgerRecords (one per turn)."""
+    text = path.read_text(encoding="utf-8")
+    records: list[ModelLedgerRecord] = []
+
+    # Extract session metadata from header
+    model = _extract_table_field(text, "Model") or ""
+    provider = _extract_table_field(text, "Provider") or ""
+    session_id = _extract_table_field(text, "ID") or path.stem
+
+    # Split into turn sections
+    turn_pattern = re.compile(r"^## Turn \d+ — (.+)$", re.MULTILINE)
+    turn_starts = list(turn_pattern.finditer(text))
+
+    for i, match in enumerate(turn_starts):
+        timestamp = match.group(1).strip()
+        start = match.end()
+        if i + 1 < len(turn_starts):
+            end = turn_starts[i + 1].start()
+        else:
+            session_end = text.find("## Session End", start)
+            end = session_end if session_end != -1 else len(text)
+
+        turn_text = text[start:end]
+        messages = _parse_messages(turn_text)
+        response_text = _extract_last_assistant(turn_text)
+        tool_calls = _parse_tool_calls(turn_text)
+
+        records.append(ModelLedgerRecord(
+            session_id=session_id,
+            timestamp=timestamp,
+            provider=provider,
+            model=model,
+            messages=[{"role": m["role"], "content": m["content"]} for m in messages],
+            response=response_text,
+            tool_calls=tool_calls,
+        ))
+
+    return records
+
+
+def _parse_messages(turn_text: str) -> list[dict]:
+    """Extract messages from a turn section."""
+    messages: list[dict] = []
+    role_map = {
+        "🔧 System": "system",
+        "👤 User": "user",
+        "🤖 Assistant": "assistant",
+    }
+    msg_pattern = re.compile(
+        r"### (🔧 System|👤 User|🤖 Assistant(?:\s*\(continued\))?)\n\n(.*?)(?=\n### |\Z)",
+        re.DOTALL,
+    )
+    for m in msg_pattern.finditer(turn_text):
+        header = m.group(1).strip()
+        content = m.group(2).strip()
+        role = "assistant"
+        for k, v in role_map.items():
+            if header.startswith(k):
+                role = v
+                break
+        if role == "system":
+            content = re.sub(r"^> ?", "", content, flags=re.MULTILINE).strip()
+        messages.append({"role": role, "content": content})
+    return messages
+
+
+def _extract_last_assistant(turn_text: str) -> str:
+    """Extract the last assistant response text from a turn."""
+    pattern = re.compile(
+        r"### 🤖 Assistant(?:\s*\(continued\))?\n\n(.*?)(?=\n### |\Z)",
+        re.DOTALL,
+    )
+    matches = list(pattern.finditer(turn_text))
+    if matches:
+        return matches[-1].group(1).strip()
+    return ""
+
+
+def _parse_tool_calls(turn_text: str) -> list[dict]:
+    """Extract tool calls from a turn section."""
+    tool_calls: list[dict] = []
+    sections = re.split(r"(?=### )", turn_text)
+
+    current_tc: Optional[dict] = None
+    for section in sections:
+        if "🛠️ Tool Call" in section and section.startswith("### 🛠️"):
+            name_match = re.search(r"`([^`]+)`", section)
+            name = name_match.group(1) if name_match else "unknown"
+            input_match = re.search(r"```json\n(.*?)\n```", section, re.DOTALL)
+            tc_input: Any = {}
+            if input_match:
+                try:
+                    tc_input = json.loads(input_match.group(1))
+                except json.JSONDecodeError:
+                    tc_input = input_match.group(1)
+            current_tc = {"name": name, "input": tc_input}
+            tool_calls.append(current_tc)
+
+        elif section.startswith("### ↩️ Tool Response") and current_tc is not None:
+            output_match = re.search(r"```\n(.*?)\n```", section, re.DOTALL)
+            if output_match:
+                current_tc["output"] = output_match.group(1)
+            current_tc = None
+
+        elif section.startswith("### ❌ Tool Error") and current_tc is not None:
+            error_match = re.search(r"```\n(.*?)\n```", section, re.DOTALL)
+            if error_match:
+                current_tc["error"] = error_match.group(1)
+            current_tc = None
+
+    return tool_calls
+
+
+# ------------------------------------------------------------------
+# Filter & Summarize (unchanged)
+# ------------------------------------------------------------------
 
 def filter_records(
     records: list[ModelLedgerRecord],

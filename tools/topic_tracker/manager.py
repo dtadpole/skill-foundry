@@ -10,7 +10,7 @@ from typing import Optional
 from .models import Topic, TopicStatus, TopicEvent
 
 
-_DEFAULT_STORAGE = Path.home() / ".skillfoundry" / "topics"
+_DEFAULT_STORAGE = Path.home() / ".blue_lantern" / "topic_tracker"
 
 
 class TopicManager:

@@ -2,14 +2,104 @@
 
 from __future__ import annotations
 
-import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 from .record import MessageRecord, ConversationRecord
 
-_DEFAULT_DIR = Path.home() / ".skillfoundry" / "user_ledger"
+_DEFAULT_DIR = Path.home() / ".blue_lantern" / "user_ledger"
+
+# Regex to parse message headers like:  ### [2026-03-07T23:10:05Z] 👤 User
+_MSG_HEADER_RE = re.compile(
+    r"^### \[([^\]]+)\] (.+)$"
+)
+
+_ROLE_LOOKUP = {
+    "👤 User": "user",
+    "🤖 Assistant": "assistant",
+    "⚙️ System": "system",
+}
+
+
+def _parse_md_messages(path: Path) -> list[MessageRecord]:
+    """Parse message records from a session Markdown file."""
+    text = path.read_text(encoding="utf-8")
+    records: list[MessageRecord] = []
+
+    # Split on message headers
+    parts = re.split(r"(?=^### \[)", text, flags=re.MULTILINE)
+    for part in parts:
+        lines = part.strip().split("\n")
+        if not lines:
+            continue
+        m = _MSG_HEADER_RE.match(lines[0])
+        if not m:
+            continue
+        timestamp = m.group(1)
+        role_display = m.group(2)
+        role = _ROLE_LOOKUP.get(role_display, role_display.lower())
+
+        # Content is everything after the header line until --- separator
+        content_lines = []
+        for line in lines[1:]:
+            if line.strip() == "---":
+                break
+            if line.startswith("**Attachments:**"):
+                break
+            content_lines.append(line)
+        content = "\n".join(content_lines).strip()
+
+        # Extract session_id from the file name
+        session_id = path.stem
+
+        records.append(MessageRecord(
+            role=role,
+            content=content,
+            timestamp=timestamp,
+            channel=_extract_field(text, "Channel"),
+        ))
+    return records
+
+
+def _extract_field(text: str, field: str) -> Optional[str]:
+    """Extract a value from a Markdown table row."""
+    m = re.search(rf"\| {re.escape(field)} \| (.+?) \|", text)
+    return m.group(1).strip() if m else None
+
+
+def _parse_md_session_info(path: Path) -> dict:
+    """Parse session metadata from a Markdown file header."""
+    text = path.read_text(encoding="utf-8")
+    session_id = path.stem
+    return {
+        "session_id": session_id,
+        "started_at": _extract_field(text, "Started"),
+        "ended_at": _extract_field(text, "Ended"),
+        "channel": _extract_field(text, "Channel"),
+        "user_name": _extract_user_name(text),
+        "total_messages": _extract_int_field(text, "Total Messages"),
+        "summary": _extract_field(text, "Summary"),
+    }
+
+
+def _extract_user_name(text: str) -> Optional[str]:
+    """Extract user name from the User field."""
+    raw = _extract_field(text, "User")
+    if not raw:
+        return None
+    # Strip phone/id in parens: "Zhen Chen (+19175455890)" → "Zhen Chen"
+    m = re.match(r"^(.*?)\s*\(", raw)
+    return m.group(1).strip() if m else raw.strip()
+
+
+def _extract_int_field(text: str, field: str) -> int:
+    raw = _extract_field(text, field)
+    try:
+        return int(raw) if raw else 0
+    except ValueError:
+        return 0
 
 
 def read_messages(
@@ -18,32 +108,26 @@ def read_messages(
     user_id: Optional[str] = None,
     log_dir: Optional[str | Path] = None,
 ) -> list[MessageRecord]:
-    """Read messages from a daily log file, optionally filtered.
+    """Read messages from session Markdown files, optionally filtered.
 
     Args:
         date: Date string in YYYY-MM-DD format. Defaults to today (UTC).
         channel: Filter to only messages from this channel.
         user_id: Filter to only messages from this sender_id.
-        log_dir: Root log directory. Defaults to ~/.skillfoundry/user_ledger/.
+        log_dir: Root log directory. Defaults to ~/.blue_lantern/user_ledger/.
     """
     if date is None:
         date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     root = Path(log_dir) if log_dir else _DEFAULT_DIR
-    # Derive the YYYY-MM subdirectory from the date
-    month_dir = root / date[:7]
-    log_path = month_dir / f"{date}.jsonl"
-
-    if not log_path.exists():
+    date_dir = root / date
+    if not date_dir.exists():
         return []
 
     records: list[MessageRecord] = []
-    with open(log_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            rec = MessageRecord.from_jsonl(line)
+    for md_file in sorted(date_dir.glob("*.md")):
+        msgs = _parse_md_messages(md_file)
+        for rec in msgs:
             if channel and rec.channel != channel:
                 continue
             if user_id and rec.sender_id != user_id:
@@ -56,22 +140,32 @@ def read_session(
     session_id: str,
     log_dir: Optional[str | Path] = None,
 ) -> Optional[ConversationRecord]:
-    """Read a session summary by session ID.
+    """Read a session by session ID.
 
-    Searches all month directories for the session file.
+    Searches all date directories for the session file.
 
     Args:
         session_id: The UUID of the session.
-        log_dir: Root log directory. Defaults to ~/.skillfoundry/user_ledger/.
+        log_dir: Root log directory. Defaults to ~/.blue_lantern/user_ledger/.
     """
     root = Path(log_dir) if log_dir else _DEFAULT_DIR
-    # Search all month directories
-    for month_dir in sorted(root.glob("*")):
-        session_path = month_dir / "sessions" / f"{session_id}.json"
+    for date_dir in sorted(root.glob("*")):
+        if not date_dir.is_dir():
+            continue
+        session_path = date_dir / f"{session_id}.md"
         if session_path.exists():
-            with open(session_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            return ConversationRecord.from_dict(data)
+            messages = _parse_md_messages(session_path)
+            info = _parse_md_session_info(session_path)
+            return ConversationRecord(
+                session_id=session_id,
+                started_at=info.get("started_at", ""),
+                ended_at=info.get("ended_at"),
+                channel=info.get("channel"),
+                user_name=info.get("user_name"),
+                messages=messages,
+                total_turns=info.get("total_messages", 0),
+                summary=info.get("summary"),
+            )
     return None
 
 
@@ -83,46 +177,30 @@ def list_sessions(
     """List session summaries as lightweight index entries.
 
     Args:
-        date: Filter to sessions from this YYYY-MM month prefix or YYYY-MM-DD date.
+        date: Filter to sessions from this YYYY-MM-DD date.
         channel: Filter to sessions on this channel.
-        log_dir: Root log directory. Defaults to ~/.skillfoundry/user_ledger/.
+        log_dir: Root log directory. Defaults to ~/.blue_lantern/user_ledger/.
 
     Returns:
         List of dicts with keys: session_id, started_at, ended_at, channel,
-        user_name, total_turns, summary.
+        user_name, total_messages, summary.
     """
     root = Path(log_dir) if log_dir else _DEFAULT_DIR
 
-    if date and len(date) == 7:
-        month_dirs = [root / date]
-    elif date and len(date) == 10:
-        month_dirs = [root / date[:7]]
+    if date:
+        date_dirs = [root / date]
     else:
-        month_dirs = sorted(root.glob("*"))
+        date_dirs = sorted(root.glob("*"))
 
     results: list[dict] = []
-    for month_dir in month_dirs:
-        sessions_dir = month_dir / "sessions"
-        if not sessions_dir.exists():
+    for date_dir in date_dirs:
+        if not date_dir.is_dir():
             continue
-        for session_file in sorted(sessions_dir.glob("*.json")):
-            with open(session_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if channel and data.get("channel") != channel:
+        for md_file in sorted(date_dir.glob("*.md")):
+            info = _parse_md_session_info(md_file)
+            if channel and info.get("channel") != channel:
                 continue
-            if date and len(date) == 10:
-                started = data.get("started_at", "")
-                if not started.startswith(date):
-                    continue
-            results.append({
-                "session_id": data.get("session_id"),
-                "started_at": data.get("started_at"),
-                "ended_at": data.get("ended_at"),
-                "channel": data.get("channel"),
-                "user_name": data.get("user_name"),
-                "total_turns": data.get("total_turns", 0),
-                "summary": data.get("summary"),
-            })
+            results.append(info)
     return results
 
 
@@ -132,13 +210,13 @@ def search(
     date_to: Optional[str] = None,
     log_dir: Optional[str | Path] = None,
 ) -> list[MessageRecord]:
-    """Simple substring search across message logs.
+    """Simple substring search across session Markdown files.
 
     Args:
         query: Substring to search for (case-insensitive).
-        date_from: Earliest date to search (YYYY-MM-DD). Defaults to searching all.
-        date_to: Latest date to search (YYYY-MM-DD). Defaults to searching all.
-        log_dir: Root log directory. Defaults to ~/.skillfoundry/user_ledger/.
+        date_from: Earliest date to search (YYYY-MM-DD).
+        date_to: Latest date to search (YYYY-MM-DD).
+        log_dir: Root log directory. Defaults to ~/.blue_lantern/user_ledger/.
 
     Returns:
         List of matching MessageRecords.
@@ -147,24 +225,19 @@ def search(
     query_lower = query.lower()
     results: list[MessageRecord] = []
 
-    for month_dir in sorted(root.glob("*")):
-        if not month_dir.is_dir():
+    for date_dir in sorted(root.glob("*")):
+        if not date_dir.is_dir():
             continue
-        for log_file in sorted(month_dir.glob("*.jsonl")):
-            # Extract date from filename
-            file_date = log_file.stem  # YYYY-MM-DD
-            if date_from and file_date < date_from:
-                continue
-            if date_to and file_date > date_to:
-                continue
-            with open(log_file, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    rec = MessageRecord.from_jsonl(line)
-                    if query_lower in rec.content.lower():
-                        results.append(rec)
+        dir_date = date_dir.name
+        if date_from and dir_date < date_from:
+            continue
+        if date_to and dir_date > date_to:
+            continue
+        for md_file in sorted(date_dir.glob("*.md")):
+            msgs = _parse_md_messages(md_file)
+            for rec in msgs:
+                if query_lower in rec.content.lower():
+                    results.append(rec)
     return results
 
 

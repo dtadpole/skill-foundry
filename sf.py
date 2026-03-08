@@ -204,7 +204,7 @@ def ledger_log(args):
 def ledger_session_end(args):
     ledger = UserLedger(session_id=args.session_id)
     rec = ledger.close(summary=args.summary)
-    print(f"Session {rec.session_id[:8]} closed.")
+    print(f"Session {rec['session_id'][:8]} closed.")
 
 
 def ledger_history(args):
