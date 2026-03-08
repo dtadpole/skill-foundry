@@ -148,17 +148,50 @@ class ModelLedger:
 
         section = f"\n---\n\n## Turn {tn} — {ts}\n"
 
-        # Render messages
+        # Render messages (content may be str or list of Anthropic blocks)
         if messages:
             for msg in messages:
                 role = msg.get("role", "user")
-                content = msg.get("content", "")
+                raw_content = msg.get("content", "")
                 icon = _ROLE_ICONS.get(role, role)
-                section += f"\n### {icon}\n\n"
-                if role == "system":
-                    section += _blockquote(content) + "\n"
+
+                if isinstance(raw_content, list):
+                    # Anthropic structured content blocks
+                    for block in raw_content:
+                        btype = block.get("type") if isinstance(block, dict) else getattr(block, "type", "text")
+                        if btype == "tool_result":
+                            tid = block.get("tool_use_id", "") if isinstance(block, dict) else getattr(block, "tool_use_id", "")
+                            result_content = block.get("content", "") if isinstance(block, dict) else getattr(block, "content", "")
+                            if isinstance(result_content, list):
+                                result_content = "\n".join(
+                                    (b.get("text", "") if isinstance(b, dict) else getattr(b, "text", ""))
+                                    for b in result_content
+                                )
+                            section += f"\n### ↩️ Tool Result (id: `{tid}`)" + "\n\n"
+                            section += f"```\n{result_content}\n```\n"
+                        elif btype == "tool_use":
+                            name = block.get("name", "") if isinstance(block, dict) else getattr(block, "name", "")
+                            inp = block.get("input", {}) if isinstance(block, dict) else getattr(block, "input", {})
+                            section += f"\n### 🛠️ Tool Call: `{name}`" + "\n\n"
+                            section += "**Input:**\n```json\n"
+                            section += json.dumps(inp, ensure_ascii=False) + "\n```\n"
+                        elif btype == "text":
+                            text = block.get("text", "") if isinstance(block, dict) else getattr(block, "text", "")
+                            if text:
+                                section += f"\n### {icon}\n\n"
+                                if role == "system":
+                                    section += _blockquote(text) + "\n"
+                                else:
+                                    section += f"{text}\n"
+                        else:
+                            section += f"\n### {icon}\n\n[block type: {btype}]\n"
                 else:
-                    section += f"{content}\n"
+                    # Plain string content
+                    section += f"\n### {icon}\n\n"
+                    if role == "system":
+                        section += _blockquote(raw_content) + "\n"
+                    else:
+                        section += f"{raw_content}\n"
 
         # Render tool calls
         if tool_calls:
@@ -401,11 +434,31 @@ def _log_openai_turn(
 def _log_anthropic_turn(
     kwargs: dict, response: Any, logger: ModelLedger
 ) -> None:
-    """Build and log a turn from an Anthropic response."""
-    messages = kwargs.get("messages", [])
+    """Build and log a turn from an Anthropic response.
+
+    Captures:
+    - system prompt (may be str or list of content blocks)
+    - all messages including tool_result blocks from previous turns
+    - tool_use blocks from the current response (with empty output placeholder)
+    - assistant text response
+    - token usage
+    """
+    messages = list(kwargs.get("messages", []))
+
+    # Prepend system prompt — may be a plain string or a list of blocks
     system = kwargs.get("system")
     if system:
-        messages = [{"role": "system", "content": system}] + messages
+        if isinstance(system, str):
+            system_content = system
+        elif isinstance(system, list):
+            # List of {type: "text", text: "..."} blocks
+            system_content = "\n".join(
+                (b.get("text", "") if isinstance(b, dict) else getattr(b, "text", ""))
+                for b in system
+            )
+        else:
+            system_content = str(system)
+        messages = [{"role": "system", "content": system_content}] + messages
 
     response_text = ""
     tool_calls_list: list[dict] = []
@@ -413,15 +466,39 @@ def _log_anthropic_turn(
 
     if response is not None:
         text_parts = []
+        # Build a map of tool_use_id → result from messages (tool_result blocks)
+        tool_results: dict[str, str] = {}
+        for msg in kwargs.get("messages", []):
+            raw = msg.get("content", [])
+            if isinstance(raw, list):
+                for block in raw:
+                    btype = block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
+                    if btype == "tool_result":
+                        tid = block.get("tool_use_id", "") if isinstance(block, dict) else getattr(block, "tool_use_id", "")
+                        rc = block.get("content", "") if isinstance(block, dict) else getattr(block, "content", "")
+                        if isinstance(rc, list):
+                            rc = "\n".join(
+                                (b.get("text", "") if isinstance(b, dict) else getattr(b, "text", ""))
+                                for b in rc
+                            )
+                        tool_results[tid] = rc
+
         for block in response.content:
-            if block.type == "text":
-                text_parts.append(block.text)
-            elif block.type == "tool_use":
-                tool_calls_list.append(
-                    {"name": block.name, "input": block.input}
-                )
+            btype = block.type if hasattr(block, "type") else block.get("type")
+            if btype == "text":
+                text_parts.append(block.text if hasattr(block, "text") else block.get("text", ""))
+            elif btype == "tool_use":
+                tid = block.id if hasattr(block, "id") else block.get("id", "")
+                name = block.name if hasattr(block, "name") else block.get("name", "")
+                inp = block.input if hasattr(block, "input") else block.get("input", {})
+                entry = {"name": name, "input": inp}
+                # Attach result if it arrived in the messages (previous-turn result)
+                if tid in tool_results:
+                    entry["output"] = tool_results[tid]
+                tool_calls_list.append(entry)
+
         response_text = "\n".join(text_parts)
-        if response.usage:
+        if hasattr(response, "usage") and response.usage:
             usage = {
                 "input_tokens": response.usage.input_tokens,
                 "output_tokens": response.usage.output_tokens,
