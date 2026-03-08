@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""sf.py — Unified CLI for skill-foundry tools (thread_tracker, user_ledger)."""
+"""sf.py — Unified CLI for skill-foundry tools (thread_tracker, user_ledger, cost_meter)."""
 
 import sys
 import argparse
@@ -12,6 +12,7 @@ from tools.thread_tracker.manager import ThreadManager
 from tools.thread_tracker.models import ThreadStatus
 from tools.user_ledger.logger import UserLedger
 from tools.user_ledger.reader import read_messages, list_sessions
+from tools.cost_meter.meter import CostMeter
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +239,51 @@ def ledger_sessions(args):
 
 
 # ---------------------------------------------------------------------------
+# CostMeter
+# ---------------------------------------------------------------------------
+
+def cost_today(args):
+    meter = CostMeter()
+    summary = meter.daily()
+    print(meter.format_summary(summary))
+
+
+def cost_month(args):
+    meter = CostMeter()
+    summary = meter.monthly()
+    print(meter.format_summary(summary))
+
+
+def cost_total(args):
+    meter = CostMeter()
+    summary = meter.total()
+    print(meter.format_summary(summary))
+
+
+def cost_sync(args):
+    meter = CostMeter()
+    count = meter.sync_from_ledger()
+    print(f"Imported {count} new session(s) from ModelLedger.")
+
+
+def cost_budget(args):
+    if args.set is not None:
+        meter = CostMeter(budget_usd=args.set)
+        print(f"Monthly budget set to ${args.set:.2f}")
+    else:
+        meter = CostMeter()
+
+    status = meter.check_budget()
+    if status is None:
+        print("No budget configured. Use: sf cost budget --set <amount>")
+        return
+    flag = " ⚠️  OVER BUDGET" if status["over_budget"] else ""
+    print(f"Budget:    ${status['budget']:.2f}")
+    print(f"Spent:     ${status['spent']:.4f}")
+    print(f"Remaining: ${status['remaining']:.4f}{flag}")
+
+
+# ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
 
@@ -331,6 +377,19 @@ def build_parser():
     p = lg_sub.add_parser("sessions", help="List sessions")
     p.add_argument("--date", default=None, help="YYYY-MM-DD or YYYY-MM")
     p.set_defaults(func=ledger_sessions)
+
+    # -- cost --
+    cp = sub.add_parser("cost", help="Cost meter commands")
+    cp_sub = cp.add_subparsers(dest="action")
+
+    cp_sub.add_parser("today", help="Today's cost summary").set_defaults(func=cost_today)
+    cp_sub.add_parser("month", help="This month's cost summary").set_defaults(func=cost_month)
+    cp_sub.add_parser("total", help="All-time cost summary").set_defaults(func=cost_total)
+    cp_sub.add_parser("sync", help="Sync from ModelLedger files").set_defaults(func=cost_sync)
+
+    p = cp_sub.add_parser("budget", help="Show or set budget")
+    p.add_argument("--set", type=float, default=None, help="Set monthly budget in USD")
+    p.set_defaults(func=cost_budget)
 
     return parser
 
