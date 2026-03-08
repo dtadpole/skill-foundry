@@ -10,6 +10,7 @@ Quick start:
 from .backend import StorageBackend
 from .config import get_backend
 from .local import LocalBackend
+from .local_first import LocalFirstBackend
 from .s3 import S3Backend
 
-__all__ = ["StorageBackend", "LocalBackend", "S3Backend", "get_backend"]
+__all__ = ["StorageBackend", "LocalBackend", "LocalFirstBackend", "S3Backend", "get_backend"]

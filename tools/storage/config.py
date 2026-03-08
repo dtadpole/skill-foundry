@@ -52,6 +52,8 @@ def _build_backend() -> StorageBackend:
     ).lower()
 
     if storage_type == "s3":
+        from .local import LocalBackend
+        from .local_first import LocalFirstBackend
         from .s3 import S3Backend
 
         bucket = (
@@ -69,6 +71,11 @@ def _build_backend() -> StorageBackend:
             or cfg.get("s3_prefix")
             or ""
         )
+        local_root = (
+            os.environ.get("SKILL_FOUNDRY_LOCAL_ROOT")
+            or cfg.get("local_root")
+            or str(_DEFAULT_LOCAL_ROOT)
+        )
 
         if not bucket:
             raise RuntimeError(
@@ -76,7 +83,9 @@ def _build_backend() -> StorageBackend:
                 "Set it via env var or ~/.skill-foundry.json."
             )
 
-        return S3Backend(bucket=bucket, region=region, prefix=prefix)
+        local = LocalBackend(root=local_root)
+        s3 = S3Backend(bucket=bucket, region=region, prefix=prefix)
+        return LocalFirstBackend(local=local, s3=s3)
 
     else:
         from .local import LocalBackend
