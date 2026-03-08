@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
-import uuid
 from dataclasses import dataclass, field, asdict
+
+from tools.ulid_utils import new_ulid
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -13,7 +14,7 @@ from typing import Optional
 class MessageRecord:
     """A single message in a user-agent conversation."""
 
-    message_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    message_id: str = field(default_factory=new_ulid)
     role: str = ""  # "user" | "assistant" | "system"
     content: str = ""
     timestamp: str = field(
@@ -49,7 +50,7 @@ class MessageRecord:
 class ConversationRecord:
     """A full conversation session between user and agent."""
 
-    session_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    session_id: str = field(default_factory=new_ulid)
     started_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )

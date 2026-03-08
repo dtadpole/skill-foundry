@@ -19,7 +19,7 @@ class TestThreadEvent:
         assert e.event_type == "note"
         assert e.actor == "assistant"
         assert e.metadata == {}
-        assert len(e.event_id) == 36  # UUID4
+        assert len(e.event_id) == 26  # ULID
 
     def test_round_trip(self):
         e = ThreadEvent(event_type="progress", description="did stuff", actor="user")

@@ -5,10 +5,13 @@ from __future__ import annotations
 import json
 import threading
 import time
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+
+from tools.storage import get_backend
+from tools.storage.backend import StorageBackend
+from tools.ulid_utils import new_ulid
 
 from .pricing import estimate_cost
 
@@ -45,9 +48,9 @@ class ModelLedger:
         channel: Optional[str] = None,
         host: str = "Blue Lantern",
         root_dir: Optional[str | Path] = None,
+        backend: Optional[StorageBackend] = None,
     ) -> None:
-        self._root_dir = Path(root_dir) if root_dir else _DEFAULT_DIR
-        self._session_id = session_id or str(uuid.uuid4())
+        self._session_id = session_id or new_ulid()
         self._model = model
         self._provider = provider
         self._channel = channel
@@ -59,12 +62,30 @@ class ModelLedger:
 
         now = datetime.now(timezone.utc)
         self._started_at = now.isoformat()
-
-        # Create date directory and session file
         today = now.strftime("%Y-%m-%d")
+
+        # Storage backend — three cases:
+        #   1. explicit backend arg
+        #   2. legacy root_dir arg → LocalBackend scoped to that dir (no namespace prefix)
+        #   3. default → global configured backend with "model_ledger/" prefix
+        if backend is not None:
+            self._backend = backend
+            self._key = f"model_ledger/{today}/{self._session_id}.md"
+        elif root_dir is not None:
+            from tools.storage.local import LocalBackend
+            self._backend = LocalBackend(root=str(root_dir))
+            self._key = f"{today}/{self._session_id}.md"
+        else:
+            self._backend = get_backend()
+            self._key = f"model_ledger/{today}/{self._session_id}.md"
+
+        # file_path for backwards compat (.file_path property)
+        if root_dir is not None:
+            self._root_dir = Path(root_dir)
+        else:
+            self._root_dir = _DEFAULT_DIR
         self._date_dir = self._root_dir / today
         self._file_path = self._date_dir / f"{self._session_id}.md"
-        self._date_dir.mkdir(parents=True, exist_ok=True)
 
         # Write session header
         header = "# ModelLedger Session\n\n"
@@ -93,8 +114,7 @@ class ModelLedger:
     def _append(self, text: str) -> None:
         """Append text to the session file (append-only)."""
         with self._lock:
-            with open(self._file_path, "a", encoding="utf-8") as f:
-                f.write(text)
+            self._backend.append(self._key, text)
 
     def log_turn(
         self,

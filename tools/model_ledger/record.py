@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
-import uuid
 from dataclasses import dataclass, field, asdict
+
+from tools.ulid_utils import new_ulid
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -14,7 +15,7 @@ class ModelLedgerRecord:
     """Structured record of a single LLM API call."""
 
     # Identity & Timing
-    request_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    request_id: str = field(default_factory=new_ulid)
     session_id: Optional[str] = None
     caller: Optional[str] = None
     timestamp: str = field(

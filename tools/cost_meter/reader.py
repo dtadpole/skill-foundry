@@ -22,6 +22,15 @@ def parse_ledger_session(md_path: str | Path) -> Optional[dict]:
     except OSError:
         return None
 
+    return parse_ledger_content(text)
+
+
+def parse_ledger_content(text: str) -> Optional[dict]:
+    """Extract session metadata from ModelLedger Markdown content (string).
+
+    Returns a dict with: session_id, model, provider, channel, input_tokens,
+    output_tokens, cost_usd, summary, ended_at.  Returns None if parsing fails.
+    """
     result: dict = {}
 
     # --- Session Header table ---

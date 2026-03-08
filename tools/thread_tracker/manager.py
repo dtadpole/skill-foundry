@@ -7,17 +7,39 @@ import threading
 from pathlib import Path
 from typing import Optional
 
-from .models import Topic, ThreadStatus, ThreadEvent
+from tools.storage import get_backend
+from tools.storage.backend import StorageBackend
 
+from .models import Topic, Thread, ThreadStatus, ThreadEvent
 
-_DEFAULT_STORAGE = Path.home() / ".blue_lantern" / "thread_tracker"
+_ACTIVE_KEY = "thread_tracker/active.json"
+_ARCHIVE_PREFIX = "thread_tracker/archive/"
 
 
 class ThreadManager:
     """Manages the lifecycle and persistence of conversation topics."""
 
-    def __init__(self, storage_dir: Optional[str | Path] = None) -> None:
-        self.storage_dir = Path(storage_dir) if storage_dir else _DEFAULT_STORAGE
+    def __init__(
+        self,
+        storage_dir: Optional[str | Path] = None,
+        backend: Optional[StorageBackend] = None,
+    ) -> None:
+        # Legacy local-dir arg still supported (wraps a LocalBackend, no prefix)
+        if backend is not None:
+            self._backend = backend
+            self._active_key = _ACTIVE_KEY
+            self._archive_prefix = _ARCHIVE_PREFIX
+        elif storage_dir is not None:
+            from tools.storage.local import LocalBackend
+            self._backend = LocalBackend(root=str(storage_dir))
+            # Legacy: keys live without the "thread_tracker/" namespace
+            self._active_key = "active.json"
+            self._archive_prefix = "archive/"
+        else:
+            self._backend = get_backend()
+            self._active_key = _ACTIVE_KEY
+            self._archive_prefix = _ARCHIVE_PREFIX
+
         self._topics: dict[str, Topic] = {}
         self._lock = threading.Lock()
         self.load()
@@ -139,53 +161,53 @@ class ThreadManager:
     # -- persistence -----------------------------------------------------
 
     def save(self) -> None:
-        """Persist active topics to disk (thread-safe)."""
+        """Persist active topics to storage (thread-safe)."""
         with self._lock:
-            self.storage_dir.mkdir(parents=True, exist_ok=True)
-            active_path = self.storage_dir / "active.json"
             active = [
                 t.to_dict()
                 for t in self._topics.values()
                 if t.status != ThreadStatus.COMPLETED
             ]
-            active_path.write_text(
-                json.dumps(active, indent=2, ensure_ascii=False)
+            self._backend.put(
+                self._active_key,
+                json.dumps(active, indent=2, ensure_ascii=False),
             )
 
     def load(self) -> None:
         """Load topics from storage."""
-        active_path = self.storage_dir / "active.json"
-        if active_path.exists():
-            data = json.loads(active_path.read_text())
-            for d in data:
+        raw = self._backend.get(self._active_key)
+        if raw:
+            for d in json.loads(raw):
                 topic = Topic.from_dict(d)
                 self._topics[topic.topic_id] = topic
 
-        # Also load archived topics into memory
-        archive_dir = self.storage_dir / "archive"
-        if archive_dir.exists():
-            for f in archive_dir.glob("*.json"):
-                data = json.loads(f.read_text())
-                topic = Topic.from_dict(data)
-                self._topics[topic.topic_id] = topic
+        # Load archived topics
+        for key in self._backend.list_prefix(self._archive_prefix):
+            raw = self._backend.get(key)
+            if raw:
+                try:
+                    topic = Topic.from_dict(json.loads(raw))
+                    self._topics[topic.topic_id] = topic
+                except (json.JSONDecodeError, KeyError):
+                    pass
 
     # -- internals -------------------------------------------------------
 
     def _require(self, topic_id: str) -> Thread:
-        topic = self._topics.get(topic_id)
-        if topic is None:
-            raise KeyError(f"Topic not found: {topic_id}")
-        return topic
+        # Support short-prefix matching (first 8 chars)
+        if topic_id in self._topics:
+            return self._topics[topic_id]
+        matches = [t for tid, t in self._topics.items() if tid.startswith(topic_id)]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise KeyError(f"Ambiguous topic ID prefix: {topic_id!r} matches {len(matches)} topics")
+        raise KeyError(f"Topic not found: {topic_id}")
 
     def _archive(self, topic: Thread) -> None:
-        """Write a completed topic to the archive directory."""
-        with self._lock:
-            archive_dir = self.storage_dir / "archive"
-            archive_dir.mkdir(parents=True, exist_ok=True)
-            path = archive_dir / f"{topic.topic_id}.json"
-            path.write_text(
-                json.dumps(topic.to_dict(), indent=2, ensure_ascii=False)
-            )
+        """Write a completed topic to the archive."""
+        key = f"{self._archive_prefix}{topic.topic_id}.json"
+        self._backend.put(key, json.dumps(topic.to_dict(), indent=2, ensure_ascii=False))
 
 
 def _circled_number(n: int) -> str:

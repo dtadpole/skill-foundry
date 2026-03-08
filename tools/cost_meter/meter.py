@@ -9,9 +9,15 @@ from pathlib import Path
 from typing import Optional
 
 from tools.model_ledger.pricing import estimate_cost
+from tools.storage import get_backend
+from tools.storage.backend import StorageBackend
 
 from .record import CostRecord, CostSummary
-from .reader import parse_ledger_session
+from .reader import parse_ledger_content
+
+_RECORDS_KEY = "cost_meter/records.jsonl"
+_BUDGET_KEY = "cost_meter/budget.json"
+_LEDGER_PREFIX = "model_ledger/"
 
 
 class CostMeter:
@@ -21,12 +27,26 @@ class CostMeter:
         self,
         root_dir: str | Path | None = None,
         budget_usd: float | None = None,
+        backend: Optional[StorageBackend] = None,
     ) -> None:
-        self.root_dir = Path(root_dir or Path.home() / ".blue_lantern" / "cost_meter")
-        self.root_dir.mkdir(parents=True, exist_ok=True)
+        if backend is not None:
+            self._backend = backend
+            self._records_key = _RECORDS_KEY
+            self._budget_key = _BUDGET_KEY
+            self._ledger_prefix = _LEDGER_PREFIX
+        elif root_dir is not None:
+            from tools.storage.local import LocalBackend
+            self._backend = LocalBackend(root=str(root_dir))
+            # Legacy: files live directly in root_dir (no namespace prefix)
+            self._records_key = "records.jsonl"
+            self._budget_key = "budget.json"
+            self._ledger_prefix = ""
+        else:
+            self._backend = get_backend()
+            self._records_key = _RECORDS_KEY
+            self._budget_key = _BUDGET_KEY
+            self._ledger_prefix = _LEDGER_PREFIX
 
-        self._records_path = self.root_dir / "records.jsonl"
-        self._budget_path = self.root_dir / "budget.json"
         self._lock = threading.Lock()
 
         if budget_usd is not None:
@@ -65,24 +85,45 @@ class CostMeter:
         )
 
         with self._lock:
-            with open(self._records_path, "a", encoding="utf-8") as f:
-                f.write(rec.to_jsonl_line() + "\n")
+            self._backend.append(self._records_key, rec.to_jsonl_line() + "\n")
 
         return rec
 
-    def sync_from_ledger(self, ledger_dir: str | Path | None = None) -> int:
-        """Import sessions from ModelLedger MD files that aren't yet recorded."""
-        ledger_root = Path(
-            ledger_dir or Path.home() / ".blue_lantern" / "model_ledger"
-        )
-        if not ledger_root.exists():
+    def sync_from_ledger(
+        self,
+        ledger_prefix: Optional[str] = None,
+        ledger_dir: Optional[Path | str] = None,
+    ) -> int:
+        """Import sessions from ModelLedger MD objects that aren't yet recorded.
+
+        Args:
+            ledger_prefix: Storage key prefix to scan (new API).
+            ledger_dir: Local directory path to scan (legacy API, takes precedence).
+        """
+        if ledger_dir is not None:
+            # Legacy path-based scanning
+            from tools.storage.local import LocalBackend
+            local = LocalBackend(root=str(ledger_dir))
+            keys = local.list_prefix("")
+            md_keys = sorted(k for k in keys if k.endswith(".md"))
+            read_content = local.get
+        else:
+            prefix = ledger_prefix if ledger_prefix is not None else self._ledger_prefix
+            keys = self._backend.list_prefix(prefix)
+            md_keys = sorted(k for k in keys if k.endswith(".md"))
+            read_content = self._backend.get
+
+        if not md_keys:
             return 0
 
         existing_ids = self._existing_session_ids()
         imported = 0
 
-        for md_file in sorted(ledger_root.glob("**/*.md")):
-            parsed = parse_ledger_session(md_file)
+        for key in md_keys:
+            content = read_content(key)
+            if not content:
+                continue
+            parsed = parse_ledger_content(content)
             if parsed is None:
                 continue
             sid = parsed.get("session_id", "")
@@ -168,10 +209,11 @@ class CostMeter:
     # ------------------------------------------------------------------
 
     def _load_records(self) -> list[CostRecord]:
-        if not self._records_path.exists():
+        raw = self._backend.get(self._records_key)
+        if not raw:
             return []
         records = []
-        for line in self._records_path.read_text(encoding="utf-8").splitlines():
+        for line in raw.splitlines():
             line = line.strip()
             if not line:
                 continue
@@ -235,16 +277,17 @@ class CostMeter:
         )
 
     def _load_budget(self) -> Optional[float]:
-        if not self._budget_path.exists():
+        raw = self._backend.get(self._budget_key)
+        if not raw:
             return None
         try:
-            data = json.loads(self._budget_path.read_text(encoding="utf-8"))
+            data = json.loads(raw)
             return float(data.get("monthly_budget_usd", 0))
         except (json.JSONDecodeError, TypeError, ValueError):
             return None
 
     def _save_budget(self, budget_usd: float) -> None:
-        self._budget_path.write_text(
+        self._backend.put(
+            self._budget_key,
             json.dumps({"monthly_budget_usd": budget_usd}, indent=2) + "\n",
-            encoding="utf-8",
         )

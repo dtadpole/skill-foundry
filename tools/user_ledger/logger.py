@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import threading
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+
+from tools.storage import get_backend
+from tools.storage.backend import StorageBackend
+from tools.ulid_utils import new_ulid
 
 _DEFAULT_DIR = Path.home() / ".blue_lantern" / "user_ledger"
 
@@ -42,23 +45,35 @@ class UserLedger:
         user_id: Optional[str] = None,
         user_name: Optional[str] = None,
         root_dir: Optional[str | Path] = None,
+        backend: Optional[StorageBackend] = None,
     ) -> None:
-        self._session_id = session_id or str(uuid.uuid4())
+        self._session_id = session_id or new_ulid()
         self._channel = channel
         self._user_id = user_id
         self._user_name = user_name
         self._lock = threading.Lock()
-        self._root_dir = Path(root_dir) if root_dir is not None else _DEFAULT_DIR
         self._message_count = 0
 
         now = datetime.now(timezone.utc)
         self._started_at = now.isoformat()
-
-        # Create date directory and session file
         today = now.strftime("%Y-%m-%d")
+
+        # Storage backend
+        if backend is not None:
+            self._backend = backend
+            self._key = f"user_ledger/{today}/{self._session_id}.md"
+        elif root_dir is not None:
+            from tools.storage.local import LocalBackend
+            self._backend = LocalBackend(root=str(root_dir))
+            self._key = f"{today}/{self._session_id}.md"
+        else:
+            self._backend = get_backend()
+            self._key = f"user_ledger/{today}/{self._session_id}.md"
+
+        # Local Path for backwards compat
+        self._root_dir = Path(root_dir) if root_dir is not None else _DEFAULT_DIR
         self._date_dir = self._root_dir / today
         self._file_path = self._date_dir / f"{self._session_id}.md"
-        self._date_dir.mkdir(parents=True, exist_ok=True)
 
         # Write session header
         header = f"# Session: {self._session_id}\n\n"
@@ -74,8 +89,7 @@ class UserLedger:
             header += f"| User | {user_display} |\n"
         header += "\n---\n\n## Messages\n"
 
-        with open(self._file_path, "a", encoding="utf-8") as f:
-            f.write(header)
+        self._backend.append(self._key, header)
 
     @property
     def session_id(self) -> str:
@@ -111,8 +125,7 @@ class UserLedger:
             section = f"\n### [{timestamp}] {role_display}\n{content}\n\n**Attachments:**\n{att_lines}\n\n---\n"
 
         with self._lock:
-            with open(self._file_path, "a", encoding="utf-8") as f:
-                f.write(section)
+            self._backend.append(self._key, section)
 
         return {
             "message_number": self._message_count,
@@ -142,8 +155,7 @@ class UserLedger:
             footer += f"| Summary | {summary} |\n"
 
         with self._lock:
-            with open(self._file_path, "a", encoding="utf-8") as f:
-                f.write(footer)
+            self._backend.append(self._key, footer)
 
         return {
             "session_id": self._session_id,

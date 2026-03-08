@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import uuid
 from dataclasses import dataclass, field
+
+from tools.ulid_utils import new_ulid
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
@@ -39,7 +40,7 @@ _STATUS_LABEL = {
 class ThreadEvent:
     """A single immutable entry in a topic's event log."""
 
-    event_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    event_id: str = field(default_factory=new_ulid)
     timestamp: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
@@ -67,7 +68,7 @@ class ThreadEvent:
 class Thread:
     """A tracked topic with status, progress, and an append-only event log."""
 
-    topic_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    topic_id: str = field(default_factory=new_ulid)
     title: str = ""
     description: str = ""
     status: ThreadStatus = ThreadStatus.PENDING
