@@ -104,12 +104,14 @@ class ModelLedger:
 
         self._append(header)
 
-        # Raw JSONL key — exact content + hashes for verification
+        # Raw JSONL key — OpenAI-format message log
         self._raw_key = self._key.replace(".md", ".jsonl")
-        self._turn_hashes: list[str] = []
+        self._all_raw_lines: list[str] = []
+        self._content_lines: list[str] = []  # non-metadata lines for session hash
 
-        # Write session start record to JSONL
-        self._append_raw({
+        # Write session metadata as first JSONL line
+        meta = {
+            "role": "metadata",
             "type": "session_start",
             "session_id": self._session_id,
             "started_at": self._started_at,
@@ -117,7 +119,8 @@ class ModelLedger:
             "provider": self._provider,
             "channel": self._channel,
             "host": self._host,
-        })
+        }
+        self._append_raw(meta)
 
     @property
     def session_id(self) -> str:
@@ -133,15 +136,13 @@ class ModelLedger:
             self._backend.append(self._key, text)
 
     def _append_raw(self, record: dict) -> None:
-        """Append a raw JSON record to the JSONL file (append-only, no lock needed — called under _lock or init)."""
-        self._backend.append(self._raw_key, json.dumps(record, ensure_ascii=False) + "\n")
-
-    @staticmethod
-    def _hash_turn(record: dict) -> str:
-        """SHA-256 of the turn record (excluding the hash field itself)."""
-        payload = {k: v for k, v in record.items() if k != "hash"}
-        serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-        return hashlib.sha256(serialized.encode()).hexdigest()
+        """Append one OpenAI-format message line to the JSONL file."""
+        line = json.dumps(record, ensure_ascii=False)
+        self._backend.append(self._raw_key, line + "\n")
+        self._all_raw_lines.append(line)
+        # Only non-metadata lines contribute to the session hash
+        if record.get("role") != "metadata":
+            self._content_lines.append(line)
 
     def log_turn(
         self,
@@ -260,25 +261,75 @@ class ModelLedger:
 
         self._append(section)
 
-        # Write raw exact record to JSONL for verification
-        raw = {
-            "type": "turn",
-            "session_id": self._session_id,
-            "turn_number": tn,
-            "timestamp": ts,
-            "messages": messages or [],
-            "tool_calls": tool_calls or [],
-            "response": response or "",
-            "usage": usage or {},
-        }
-        # content_chars: size of the real content (excluding metadata fields)
-        _meta_fields = {"content_chars", "hash"}
-        _content_only = {k: v for k, v in raw.items() if k not in _meta_fields}
-        raw["content_chars"] = len(json.dumps(_content_only, ensure_ascii=False, sort_keys=True))
-        raw["hash"] = self._hash_turn(raw)  # hash excludes itself
+        # Write OpenAI-format messages to JSONL
         with self._lock:
-            self._append_raw(raw)
-            self._turn_hashes.append(raw["hash"])
+            self._write_openai_messages(
+                messages=messages or [],
+                tool_calls=tool_calls or [],
+                response=response,
+            )
+
+    def _write_openai_messages(
+        self,
+        messages: list[dict],
+        tool_calls: list[dict],
+        response: Optional[str],
+    ) -> None:
+        """Write a turn as OpenAI-format JSONL message lines (called under _lock)."""
+        # 1. Input messages: system, user, tool_results from prev turns
+        for msg in messages:
+            role = msg.get("role", "user")
+            raw_content = msg.get("content", "")
+
+            if isinstance(raw_content, list):
+                pending_text: list[str] = []
+                for block in raw_content:
+                    btype = block.get("type") if isinstance(block, dict) else getattr(block, "type", "text")
+                    if btype == "tool_result":
+                        if pending_text:
+                            self._append_raw({"role": role, "content": "\n".join(pending_text)})
+                            pending_text = []
+                        tid = block.get("tool_use_id", "") if isinstance(block, dict) else getattr(block, "tool_use_id", "")
+                        rc = block.get("content", "") if isinstance(block, dict) else getattr(block, "content", "")
+                        if isinstance(rc, list):
+                            rc = "\n".join(b.get("text", "") if isinstance(b, dict) else getattr(b, "text", "") for b in rc)
+                        self._append_raw({"role": "tool", "tool_call_id": tid, "content": str(rc)})
+                    elif btype == "tool_use":
+                        name = block.get("name", "") if isinstance(block, dict) else getattr(block, "name", "")
+                        inp = block.get("input", {}) if isinstance(block, dict) else getattr(block, "input", {})
+                        self._append_raw({"role": "assistant", "content": None, "tool_calls": [
+                            {"id": new_ulid(), "type": "function", "function": {"name": name, "arguments": json.dumps(inp, ensure_ascii=False)}}
+                        ]})
+                    else:
+                        text = block.get("text", "") if isinstance(block, dict) else getattr(block, "text", "")
+                        if text:
+                            pending_text.append(text)
+                if pending_text:
+                    self._append_raw({"role": role, "content": "\n".join(pending_text)})
+            else:
+                self._append_raw({"role": role, "content": raw_content})
+
+        # 2. Assistant tool_calls message
+        if tool_calls:
+            tc_entries = []
+            tc_id_map: list[str] = []
+            for tc in tool_calls:
+                tc_id = new_ulid()
+                tc_id_map.append(tc_id)
+                tc_entries.append({"id": tc_id, "type": "function", "function": {
+                    "name": tc.get("name", ""),
+                    "arguments": json.dumps(tc.get("input", {}), ensure_ascii=False),
+                }})
+            self._append_raw({"role": "assistant", "content": None, "tool_calls": tc_entries})
+
+            # 3. Tool result messages
+            for i, tc in enumerate(tool_calls):
+                output = tc.get("output") if tc.get("output") is not None else tc.get("error", "")
+                self._append_raw({"role": "tool", "tool_call_id": tc_id_map[i], "name": tc.get("name", ""), "content": str(output)})
+
+        # 4. Final assistant response
+        if response is not None:
+            self._append_raw({"role": "assistant", "content": response})
 
     def close(
         self,
@@ -318,13 +369,14 @@ class ModelLedger:
 
         self._append(footer)
 
-        # Session-level hash chaining all turn hashes
+        # Session hash over non-metadata content lines only
         session_hash = hashlib.sha256(
-            "".join(self._turn_hashes).encode()
+            "\n".join(self._content_lines).encode()
         ).hexdigest()
 
         with self._lock:
             self._append_raw({
+                "role": "metadata",
                 "type": "session_end",
                 "session_id": self._session_id,
                 "ended_at": ended_at,

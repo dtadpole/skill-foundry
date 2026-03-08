@@ -1,9 +1,18 @@
-"""ModelLedger verification — check completeness and integrity of session logs.
+"""ModelLedger verification — check completeness and integrity of JSONL session logs.
+
+JSONL format (OpenAI-compatible):
+    {"role": "metadata", "type": "session_start", ...}  ← first line
+    {"role": "system",    "content": "..."}
+    {"role": "user",      "content": "..."}
+    {"role": "assistant", "content": null, "tool_calls": [...]}
+    {"role": "tool",      "tool_call_id": "...", "name": "...", "content": "..."}
+    {"role": "assistant", "content": "final response"}
+    {"role": "metadata", "type": "session_end", ..., "session_hash": "..."}  ← last line
 
 Usage:
     from tools.model_ledger.verify import verify_session
     result = verify_session("model_ledger/2026-03-08/01KK5XYZ.jsonl")
-    print(result.ok, result.errors)
+    print(result.summary())
 """
 
 from __future__ import annotations
@@ -16,27 +25,23 @@ from typing import Optional
 from tools.storage import get_backend
 from tools.storage.backend import StorageBackend
 
+VALID_ROLES = {"system", "user", "assistant", "tool", "metadata"}
+
 
 @dataclass
 class VerifyResult:
-    """Result of a session verification."""
-
     ok: bool
     session_id: str = ""
-    total_turns: int = 0
-    verified_turns: int = 0
+    total_messages: int = 0
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     session_hash: Optional[str] = None
 
     def summary(self) -> str:
         status = "✅ PASS" if self.ok else "❌ FAIL"
-        lines = [
-            f"{status}  session={self.session_id}",
-            f"  Turns: {self.verified_turns}/{self.total_turns} verified",
-        ]
+        lines = [f"{status}  session={self.session_id}  messages={self.total_messages}"]
         if self.session_hash:
-            lines.append(f"  Session hash: {self.session_hash[:16]}…")
+            lines.append(f"  Session hash: {self.session_hash[:32]}…")
         for e in self.errors:
             lines.append(f"  ❌ {e}")
         for w in self.warnings:
@@ -48,22 +53,16 @@ def verify_session(
     jsonl_key: str,
     backend: Optional[StorageBackend] = None,
 ) -> VerifyResult:
-    """Verify a ModelLedger JSONL session file for completeness and integrity.
+    """Verify a ModelLedger JSONL session for completeness and integrity.
 
     Checks:
-    1. Session starts with a 'session_start' record
-    2. Each 'turn' record's hash matches its content
-    3. Turns are sequential (no gaps, no duplicates)
-    4. Each turn has non-empty messages and response
-    5. Session ends with a 'session_end' record
-    6. Session-level hash matches all turn hashes chained
-
-    Args:
-        jsonl_key: Storage key for the .jsonl file
-        backend: Storage backend (defaults to get_backend())
-
-    Returns:
-        VerifyResult with ok=True if all checks pass
+    1. First line is metadata/session_start
+    2. Last line is metadata/session_end
+    3. All lines are valid JSON with a 'role' field
+    4. All roles are valid OpenAI roles (or 'metadata')
+    5. Every tool call (assistant with tool_calls) has matching tool result(s)
+    6. Session hash in session_end matches hash of all content lines
+    7. No empty assistant or user messages
     """
     b = backend or get_backend()
     result = VerifyResult(ok=False)
@@ -75,7 +74,7 @@ def verify_session(
         errors.append(f"JSONL file not found: {jsonl_key}")
         return result
 
-    records = []
+    records: list[dict] = []
     for i, line in enumerate(raw.splitlines(), 1):
         line = line.strip()
         if not line:
@@ -86,100 +85,86 @@ def verify_session(
             errors.append(f"Line {i}: invalid JSON — {e}")
 
     if not records:
-        errors.append("JSONL file is empty")
+        errors.append("JSONL is empty")
         return result
 
-    # ── Check 1: session_start ──────────────────────────────────────
-    if records[0].get("type") != "session_start":
-        errors.append("First record is not 'session_start'")
-    else:
-        result.session_id = records[0].get("session_id", "")
+    result.total_messages = len(records)
 
-    # ── Check 2: session_end ────────────────────────────────────────
-    if records[-1].get("type") != "session_end":
-        errors.append("Last record is not 'session_end' — session may be incomplete")
+    # ── Check 1: session_start ────────────────────────────────────────
+    first = records[0]
+    if not (first.get("role") == "metadata" and first.get("type") == "session_start"):
+        errors.append("First line is not metadata/session_start")
+    else:
+        result.session_id = first.get("session_id", "")
+
+    # ── Check 2: session_end ─────────────────────────────────────────
+    last = records[-1]
+    if not (last.get("role") == "metadata" and last.get("type") == "session_end"):
+        errors.append("Last line is not metadata/session_end — session may be incomplete")
         session_end = None
     else:
-        session_end = records[-1]
-        result.total_turns = session_end.get("total_turns", 0)
+        session_end = last
 
-    # ── Check 3: turn records ───────────────────────────────────────
-    turn_records = [r for r in records if r.get("type") == "turn"]
-    turn_hashes: list[str] = []
-    expected_turn = 1
+    # ── Check 3 & 4: valid roles, non-empty content ───────────────────
+    content_lines: list[str] = []  # all non-metadata lines, for hash
+    pending_tool_call_ids: list[str] = []  # ids needing a tool result
 
-    for rec in turn_records:
-        tn = rec.get("turn_number", -1)
+    for i, rec in enumerate(records):
+        role = rec.get("role", "")
+        if role not in VALID_ROLES:
+            errors.append(f"Line {i+1}: unknown role '{role}'")
+            continue
 
-        # Sequential order
-        if tn != expected_turn:
-            errors.append(f"Turn sequence gap: expected {expected_turn}, got {tn}")
-        expected_turn = tn + 1
+        if role == "metadata":
+            continue  # metadata lines excluded from content hash
 
-        # Hash verification
-        stored_hash = rec.get("hash", "")
-        payload = {k: v for k, v in rec.items() if k != "hash"}
-        computed = hashlib.sha256(
-            json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()
-        ).hexdigest()
-        if stored_hash != computed:
-            errors.append(
-                f"Turn {tn}: hash mismatch — stored={stored_hash[:16]}…, computed={computed[:16]}…"
-            )
-        else:
-            result.verified_turns += 1
-            turn_hashes.append(stored_hash)
+        line_str = json.dumps(rec, ensure_ascii=False)
+        content_lines.append(line_str)
 
-        # Content completeness
-        messages = rec.get("messages", [])
-        response = rec.get("response", "")
-        tool_calls = rec.get("tool_calls", [])
+        if role == "user" and not rec.get("content"):
+            warnings.append(f"Line {i+1}: user message has empty content")
 
-        if not messages:
-            warnings.append(f"Turn {tn}: no messages recorded")
-        if not response and not tool_calls:
-            warnings.append(f"Turn {tn}: no response and no tool_calls")
+        if role == "assistant":
+            tool_calls = rec.get("tool_calls")
+            content = rec.get("content")
+            if not tool_calls and not content:
+                warnings.append(f"Line {i+1}: assistant message has no content and no tool_calls")
+            if tool_calls:
+                for tc in tool_calls:
+                    tc_id = tc.get("id", "")
+                    if not tc_id:
+                        errors.append(f"Line {i+1}: tool_call missing 'id'")
+                    else:
+                        pending_tool_call_ids.append(tc_id)
+                    fn = tc.get("function", {})
+                    if not fn.get("name"):
+                        errors.append(f"Line {i+1}: tool_call missing function name")
+                    if not fn.get("arguments"):
+                        warnings.append(f"Line {i+1}: tool_call '{fn.get('name', '?')}' has empty arguments")
 
-        # Check tool_calls have both input and output
-        for tc in tool_calls:
-            name = tc.get("name", "?")
-            if "input" not in tc:
-                errors.append(f"Turn {tn}: tool '{name}' missing input")
-            if "output" not in tc and "error" not in tc:
-                warnings.append(f"Turn {tn}: tool '{name}' has no output or error recorded")
+        if role == "tool":
+            tc_id = rec.get("tool_call_id", "")
+            if tc_id in pending_tool_call_ids:
+                pending_tool_call_ids.remove(tc_id)
+            else:
+                warnings.append(f"Line {i+1}: tool result references unknown tool_call_id '{tc_id}'")
+            if not rec.get("content") and rec.get("content") != "":
+                warnings.append(f"Line {i+1}: tool result has no content")
 
-        # Content size sanity (exclude metadata fields, same as logger)
-        recorded_chars = rec.get("content_chars", 0)
-        _meta = {"content_chars", "hash"}
-        content_only = {k: v for k, v in rec.items() if k not in _meta}
-        actual_chars = len(json.dumps(content_only, ensure_ascii=False, sort_keys=True))
-        if recorded_chars > 0 and abs(actual_chars - recorded_chars) > 2:
-            warnings.append(
-                f"Turn {tn}: content_chars mismatch (recorded={recorded_chars}, actual={actual_chars})"
-            )
+    # ── Check 5: unmatched tool calls ────────────────────────────────
+    for tc_id in pending_tool_call_ids:
+        errors.append(f"Tool call '{tc_id[:16]}…' has no matching tool result")
 
-    # ── Check 4: session-level hash chain ───────────────────────────
-    if session_end and turn_hashes:
-        expected_session_hash = hashlib.sha256(
-            "".join(turn_hashes).encode()
-        ).hexdigest()
-        stored_session_hash = session_end.get("session_hash", "")
-        if stored_session_hash != expected_session_hash:
-            errors.append(
-                f"Session hash mismatch — stored={stored_session_hash[:16]}…, "
-                f"computed={expected_session_hash[:16]}…"
-            )
-        else:
-            result.session_hash = stored_session_hash
-
-    # ── Check 5: turn count consistency ─────────────────────────────
+    # ── Check 6: session hash ────────────────────────────────────────
     if session_end:
-        declared = session_end.get("total_turns", 0)
-        actual = len(turn_records)
-        if declared != actual:
+        stored_hash = session_end.get("session_hash", "")
+        computed_hash = hashlib.sha256("\n".join(content_lines).encode()).hexdigest()
+        if stored_hash != computed_hash:
             errors.append(
-                f"Turn count mismatch: session_end says {declared}, found {actual} turn records"
+                f"Session hash mismatch — stored={stored_hash[:16]}…, computed={computed_hash[:16]}…"
             )
+        else:
+            result.session_hash = stored_hash
 
     result.ok = len(errors) == 0
     return result
