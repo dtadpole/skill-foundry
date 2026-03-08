@@ -271,8 +271,10 @@ class ModelLedger:
             "response": response or "",
             "usage": usage or {},
         }
-        # content_chars: size of the payload *before* adding hash/content_chars
-        raw["content_chars"] = len(json.dumps(raw, ensure_ascii=False, sort_keys=True))
+        # content_chars: size of the real content (excluding metadata fields)
+        _meta_fields = {"content_chars", "hash"}
+        _content_only = {k: v for k, v in raw.items() if k not in _meta_fields}
+        raw["content_chars"] = len(json.dumps(_content_only, ensure_ascii=False, sort_keys=True))
         raw["hash"] = self._hash_turn(raw)  # hash excludes itself
         with self._lock:
             self._append_raw(raw)

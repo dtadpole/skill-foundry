@@ -148,10 +148,12 @@ def verify_session(
             if "output" not in tc and "error" not in tc:
                 warnings.append(f"Turn {tn}: tool '{name}' has no output or error recorded")
 
-        # Content size sanity
+        # Content size sanity (exclude metadata fields, same as logger)
         recorded_chars = rec.get("content_chars", 0)
-        actual_chars = len(json.dumps(payload, ensure_ascii=False))
-        if recorded_chars > 0 and abs(actual_chars - recorded_chars) > 10:
+        _meta = {"content_chars", "hash"}
+        content_only = {k: v for k, v in rec.items() if k not in _meta}
+        actual_chars = len(json.dumps(content_only, ensure_ascii=False, sort_keys=True))
+        if recorded_chars > 0 and abs(actual_chars - recorded_chars) > 2:
             warnings.append(
                 f"Turn {tn}: content_chars mismatch (recorded={recorded_chars}, actual={actual_chars})"
             )
