@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 import time
@@ -103,6 +104,21 @@ class ModelLedger:
 
         self._append(header)
 
+        # Raw JSONL key — exact content + hashes for verification
+        self._raw_key = self._key.replace(".md", ".jsonl")
+        self._turn_hashes: list[str] = []
+
+        # Write session start record to JSONL
+        self._append_raw({
+            "type": "session_start",
+            "session_id": self._session_id,
+            "started_at": self._started_at,
+            "model": self._model,
+            "provider": self._provider,
+            "channel": self._channel,
+            "host": self._host,
+        })
+
     @property
     def session_id(self) -> str:
         return self._session_id
@@ -112,9 +128,20 @@ class ModelLedger:
         return self._file_path
 
     def _append(self, text: str) -> None:
-        """Append text to the session file (append-only)."""
+        """Append text to the session Markdown file (append-only)."""
         with self._lock:
             self._backend.append(self._key, text)
+
+    def _append_raw(self, record: dict) -> None:
+        """Append a raw JSON record to the JSONL file (append-only, no lock needed — called under _lock or init)."""
+        self._backend.append(self._raw_key, json.dumps(record, ensure_ascii=False) + "\n")
+
+    @staticmethod
+    def _hash_turn(record: dict) -> str:
+        """SHA-256 of the turn record (excluding the hash field itself)."""
+        payload = {k: v for k, v in record.items() if k != "hash"}
+        serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        return hashlib.sha256(serialized.encode()).hexdigest()
 
     def log_turn(
         self,
@@ -233,6 +260,24 @@ class ModelLedger:
 
         self._append(section)
 
+        # Write raw exact record to JSONL for verification
+        raw = {
+            "type": "turn",
+            "session_id": self._session_id,
+            "turn_number": tn,
+            "timestamp": ts,
+            "messages": messages or [],
+            "tool_calls": tool_calls or [],
+            "response": response or "",
+            "usage": usage or {},
+        }
+        # content_chars: size of the payload *before* adding hash/content_chars
+        raw["content_chars"] = len(json.dumps(raw, ensure_ascii=False, sort_keys=True))
+        raw["hash"] = self._hash_turn(raw)  # hash excludes itself
+        with self._lock:
+            self._append_raw(raw)
+            self._turn_hashes.append(raw["hash"])
+
     def close(
         self,
         summary: Optional[str] = None,
@@ -271,6 +316,24 @@ class ModelLedger:
 
         self._append(footer)
 
+        # Session-level hash chaining all turn hashes
+        session_hash = hashlib.sha256(
+            "".join(self._turn_hashes).encode()
+        ).hexdigest()
+
+        with self._lock:
+            self._append_raw({
+                "type": "session_end",
+                "session_id": self._session_id,
+                "ended_at": ended_at,
+                "total_turns": self._turn_count,
+                "input_tokens": in_tok,
+                "output_tokens": out_tok,
+                "estimated_cost": cost,
+                "summary": summary,
+                "session_hash": session_hash,
+            })
+
         return {
             "session_id": self._session_id,
             "ended_at": ended_at,
@@ -279,6 +342,7 @@ class ModelLedger:
             "output_tokens": out_tok,
             "estimated_cost": cost,
             "summary": summary,
+            "session_hash": session_hash,
         }
 
     # ------------------------------------------------------------------
