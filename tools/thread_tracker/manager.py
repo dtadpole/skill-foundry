@@ -1,4 +1,4 @@
-"""TopicManager — CRUD, persistence, and snapshot for tracked topics."""
+"""ThreadManager — CRUD, persistence, and snapshot for tracked topics."""
 
 from __future__ import annotations
 
@@ -7,13 +7,13 @@ import threading
 from pathlib import Path
 from typing import Optional
 
-from .models import Topic, TopicStatus, TopicEvent
+from .models import Topic, ThreadStatus, ThreadEvent
 
 
-_DEFAULT_STORAGE = Path.home() / ".blue_lantern" / "topic_tracker"
+_DEFAULT_STORAGE = Path.home() / ".blue_lantern" / "thread_tracker"
 
 
-class TopicManager:
+class ThreadManager:
     """Manages the lifecycle and persistence of conversation topics."""
 
     def __init__(self, storage_dir: Optional[str | Path] = None) -> None:
@@ -29,7 +29,7 @@ class TopicManager:
         title: str,
         description: str = "",
         tags: Optional[list[str]] = None,
-    ) -> Topic:
+    ) -> Thread:
         """Create a new topic and persist it."""
         topic = Topic(title=title, description=description, tags=tags or [])
         topic.add_event("created", f"Topic created: {title}")
@@ -37,11 +37,11 @@ class TopicManager:
         self.save()
         return topic
 
-    def get(self, topic_id: str) -> Optional[Topic]:
+    def get(self, topic_id: str) -> Optional[Thread]:
         """Return a topic by ID, or None."""
         return self._topics.get(topic_id)
 
-    def find(self, query: str) -> list[Topic]:
+    def find(self, query: str) -> list[Thread]:
         """Search topics by title, description, or tags (case-insensitive substring)."""
         q = query.lower()
         results = []
@@ -54,11 +54,11 @@ class TopicManager:
                 results.append(t)
         return results
 
-    def list_active(self) -> list[Topic]:
+    def list_active(self) -> list[Thread]:
         """Return all non-completed topics."""
-        return [t for t in self._topics.values() if t.status != TopicStatus.COMPLETED]
+        return [t for t in self._topics.values() if t.status != ThreadStatus.COMPLETED]
 
-    def list_all(self) -> list[Topic]:
+    def list_all(self) -> list[Thread]:
         """Return every topic (active + archived in memory)."""
         return list(self._topics.values())
 
@@ -67,37 +67,37 @@ class TopicManager:
     def update_status(
         self,
         topic_id: str,
-        status: TopicStatus,
+        status: ThreadStatus,
         note: Optional[str] = None,
-    ) -> Topic:
+    ) -> Thread:
         """Change a topic's status."""
         topic = self._require(topic_id)
         topic.set_status(status, note=note)
         self.save()
         return topic
 
-    def add_progress(self, topic_id: str, description: str) -> Topic:
+    def add_progress(self, topic_id: str, description: str) -> Thread:
         """Record a completed step on a topic."""
         topic = self._require(topic_id)
         topic.add_progress(description)
         self.save()
         return topic
 
-    def add_pending(self, topic_id: str, action: str) -> Topic:
+    def add_pending(self, topic_id: str, action: str) -> Thread:
         """Add a pending action to a topic."""
         topic = self._require(topic_id)
         topic.add_pending(action)
         self.save()
         return topic
 
-    def resolve_pending(self, topic_id: str, action: str) -> Topic:
+    def resolve_pending(self, topic_id: str, action: str) -> Thread:
         """Move a pending action to done."""
         topic = self._require(topic_id)
         topic.resolve_pending(action)
         self.save()
         return topic
 
-    def set_current(self, topic_id: str, action: str) -> Topic:
+    def set_current(self, topic_id: str, action: str) -> Thread:
         """Set the current action for a topic."""
         topic = self._require(topic_id)
         topic.current_action = action
@@ -105,10 +105,10 @@ class TopicManager:
         self.save()
         return topic
 
-    def close(self, topic_id: str, summary: Optional[str] = None) -> Topic:
+    def close(self, topic_id: str, summary: Optional[str] = None) -> Thread:
         """Mark a topic COMPLETED and archive it."""
         topic = self._require(topic_id)
-        topic.set_status(TopicStatus.COMPLETED, note=summary)
+        topic.set_status(ThreadStatus.COMPLETED, note=summary)
         topic.current_action = None
         self._archive(topic)
         self.save()
@@ -145,7 +145,7 @@ class TopicManager:
             active = [
                 t.to_dict()
                 for t in self._topics.values()
-                if t.status != TopicStatus.COMPLETED
+                if t.status != ThreadStatus.COMPLETED
             ]
             active_path.write_text(
                 json.dumps(active, indent=2, ensure_ascii=False)
@@ -170,13 +170,13 @@ class TopicManager:
 
     # -- internals -------------------------------------------------------
 
-    def _require(self, topic_id: str) -> Topic:
+    def _require(self, topic_id: str) -> Thread:
         topic = self._topics.get(topic_id)
         if topic is None:
             raise KeyError(f"Topic not found: {topic_id}")
         return topic
 
-    def _archive(self, topic: Topic) -> None:
+    def _archive(self, topic: Thread) -> None:
         """Write a completed topic to the archive directory."""
         with self._lock:
             archive_dir = self.storage_dir / "archive"

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""sf.py — Unified CLI for skill-foundry tools (topic_tracker, user_ledger)."""
+"""sf.py — Unified CLI for skill-foundry tools (thread_tracker, user_ledger)."""
 
 import sys
 import argparse
@@ -8,8 +8,8 @@ from pathlib import Path
 # Ensure skill-foundry root is on sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from tools.topic_tracker.manager import TopicManager
-from tools.topic_tracker.models import TopicStatus
+from tools.thread_tracker.manager import ThreadManager
+from tools.thread_tracker.models import ThreadStatus
 from tools.user_ledger.logger import UserLedger
 from tools.user_ledger.reader import read_messages, list_sessions
 
@@ -18,7 +18,7 @@ from tools.user_ledger.reader import read_messages, list_sessions
 # Topics
 # ---------------------------------------------------------------------------
 
-VALID_STATUSES = [s.value for s in TopicStatus]
+VALID_STATUSES = [s.value for s in ThreadStatus]
 
 
 def _fmt_topic_line(t):
@@ -29,30 +29,30 @@ def _fmt_topic_line(t):
     return line
 
 
-def topics_list(args):
-    mgr = TopicManager()
+def threads_list(args):
+    mgr = ThreadManager()
     active = mgr.list_active()
     if not active:
-        print("No active topics.")
+        print("No active threads.")
         return
-    print(f"Active topics ({len(active)}):")
+    print(f"Active threads ({len(active)}):")
     for t in active:
         print(_fmt_topic_line(t))
 
 
-def topics_all(args):
-    mgr = TopicManager()
-    all_topics = mgr.list_all()
-    if not all_topics:
-        print("No topics.")
+def threads_all(args):
+    mgr = ThreadManager()
+    all_threads = mgr.list_all()
+    if not all_threads:
+        print("No threads.")
         return
-    print(f"All topics ({len(all_topics)}):")
-    for t in all_topics:
+    print(f"All threads ({len(all_threads)}):")
+    for t in all_threads:
         print(_fmt_topic_line(t))
 
 
-def topics_show(args):
-    mgr = TopicManager()
+def threads_show(args):
+    mgr = ThreadManager()
     t = mgr.get(args.topic_id)
     if not t:
         print(f"Error: topic not found: {args.topic_id}", file=sys.stderr)
@@ -89,30 +89,30 @@ def topics_show(args):
             print(f"    [{e.timestamp[:19]}] {e.event_type}: {e.description}")
 
 
-def topics_add(args):
-    mgr = TopicManager()
+def threads_add(args):
+    mgr = ThreadManager()
     topic = mgr.create(title=args.title, description=args.original_request)
     topic.original_request = args.original_request
     mgr.save()
     print(topic.topic_id)
 
 
-def topics_status(args):
+def threads_status(args):
     status_str = args.status.lower()
     if status_str not in VALID_STATUSES:
         print(f"Error: invalid status '{args.status}'. Valid: {', '.join(VALID_STATUSES)}", file=sys.stderr)
         sys.exit(1)
-    mgr = TopicManager()
+    mgr = ThreadManager()
     try:
-        t = mgr.update_status(args.topic_id, TopicStatus(status_str))
+        t = mgr.update_status(args.topic_id, ThreadStatus(status_str))
         print(f"Updated {t.topic_id[:8]} → {t.status.value}")
     except KeyError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
 
-def topics_progress(args):
-    mgr = TopicManager()
+def threads_progress(args):
+    mgr = ThreadManager()
     try:
         t = mgr.add_progress(args.topic_id, args.what_was_done)
         print(f"Logged progress on {t.topic_id[:8]}: {args.what_was_done}")
@@ -121,8 +121,8 @@ def topics_progress(args):
         sys.exit(1)
 
 
-def topics_pending(args):
-    mgr = TopicManager()
+def threads_pending(args):
+    mgr = ThreadManager()
     try:
         t = mgr.add_pending(args.topic_id, args.next_action)
         print(f"Added pending on {t.topic_id[:8]}: {args.next_action}")
@@ -131,8 +131,8 @@ def topics_pending(args):
         sys.exit(1)
 
 
-def topics_resolve(args):
-    mgr = TopicManager()
+def threads_resolve(args):
+    mgr = ThreadManager()
     try:
         t = mgr.resolve_pending(args.topic_id, args.action)
         print(f"Resolved on {t.topic_id[:8]}: {args.action}")
@@ -141,8 +141,8 @@ def topics_resolve(args):
         sys.exit(1)
 
 
-def topics_current(args):
-    mgr = TopicManager()
+def threads_current(args):
+    mgr = ThreadManager()
     try:
         t = mgr.set_current(args.topic_id, args.current_action)
         print(f"Set current on {t.topic_id[:8]}: {args.current_action}")
@@ -151,8 +151,8 @@ def topics_current(args):
         sys.exit(1)
 
 
-def topics_tool(args):
-    mgr = TopicManager()
+def threads_tool(args):
+    mgr = ThreadManager()
     try:
         t = mgr._require(args.topic_id)
         t.log_tool_call(args.tool_name, result=args.result_summary)
@@ -163,8 +163,8 @@ def topics_tool(args):
         sys.exit(1)
 
 
-def topics_close(args):
-    mgr = TopicManager()
+def threads_close(args):
+    mgr = ThreadManager()
     try:
         t = mgr.close(args.topic_id, summary=args.summary)
         print(f"Closed {t.topic_id[:8]}: {t.title}")
@@ -173,8 +173,8 @@ def topics_close(args):
         sys.exit(1)
 
 
-def topics_snapshot(args):
-    mgr = TopicManager()
+def threads_snapshot(args):
+    mgr = ThreadManager()
     print(mgr.snapshot())
 
 
@@ -248,59 +248,59 @@ def build_parser():
     )
     sub = parser.add_subparsers(dest="command")
 
-    # -- topics --
-    tp = sub.add_parser("topics", help="Topic tracker commands")
+    # -- threads --
+    tp = sub.add_parser("threads", help="Topic tracker commands")
     tp_sub = tp.add_subparsers(dest="action")
 
-    tp_sub.add_parser("list", help="List active topics").set_defaults(func=topics_list)
-    tp_sub.add_parser("all", help="List all topics").set_defaults(func=topics_all)
+    tp_sub.add_parser("list", help="List active threads").set_defaults(func=threads_list)
+    tp_sub.add_parser("all", help="List all threads").set_defaults(func=threads_all)
 
     p = tp_sub.add_parser("show", help="Show topic details")
     p.add_argument("topic_id")
-    p.set_defaults(func=topics_show)
+    p.set_defaults(func=threads_show)
 
     p = tp_sub.add_parser("add", help="Create a new topic")
     p.add_argument("title")
     p.add_argument("original_request")
-    p.set_defaults(func=topics_add)
+    p.set_defaults(func=threads_add)
 
     p = tp_sub.add_parser("status", help="Update topic status")
     p.add_argument("topic_id")
     p.add_argument("status", choices=VALID_STATUSES)
-    p.set_defaults(func=topics_status)
+    p.set_defaults(func=threads_status)
 
     p = tp_sub.add_parser("progress", help="Log progress on a topic")
     p.add_argument("topic_id")
     p.add_argument("what_was_done")
-    p.set_defaults(func=topics_progress)
+    p.set_defaults(func=threads_progress)
 
     p = tp_sub.add_parser("pending", help="Add pending action")
     p.add_argument("topic_id")
     p.add_argument("next_action")
-    p.set_defaults(func=topics_pending)
+    p.set_defaults(func=threads_pending)
 
     p = tp_sub.add_parser("resolve", help="Resolve a pending action")
     p.add_argument("topic_id")
     p.add_argument("action")
-    p.set_defaults(func=topics_resolve)
+    p.set_defaults(func=threads_resolve)
 
     p = tp_sub.add_parser("current", help="Set current action")
     p.add_argument("topic_id")
     p.add_argument("current_action")
-    p.set_defaults(func=topics_current)
+    p.set_defaults(func=threads_current)
 
     p = tp_sub.add_parser("tool", help="Log a tool call")
     p.add_argument("topic_id")
     p.add_argument("tool_name")
     p.add_argument("result_summary")
-    p.set_defaults(func=topics_tool)
+    p.set_defaults(func=threads_tool)
 
     p = tp_sub.add_parser("close", help="Close a topic")
     p.add_argument("topic_id")
     p.add_argument("summary")
-    p.set_defaults(func=topics_close)
+    p.set_defaults(func=threads_close)
 
-    tp_sub.add_parser("snapshot", help="Compact snapshot of active topics").set_defaults(func=topics_snapshot)
+    tp_sub.add_parser("snapshot", help="Compact snapshot of active threads").set_defaults(func=threads_snapshot)
 
     # -- ledger --
     lg = sub.add_parser("ledger", help="User ledger commands")

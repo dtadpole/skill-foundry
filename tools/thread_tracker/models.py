@@ -9,7 +9,7 @@ from enum import Enum
 from typing import Optional
 
 
-class TopicStatus(Enum):
+class ThreadStatus(Enum):
     """Lifecycle states for a tracked topic."""
 
     PENDING = "pending"
@@ -24,19 +24,19 @@ class TopicStatus(Enum):
 
 # Short display labels for snapshot output
 _STATUS_LABEL = {
-    TopicStatus.PENDING: "pending",
-    TopicStatus.IN_PROGRESS: "in_progress",
-    TopicStatus.AWAITING_USER: "awaiting_user",
-    TopicStatus.AWAITING_AGENT: "awaiting_agent",
-    TopicStatus.AWAITING_VERIFICATION: "awaiting_verification",
-    TopicStatus.PAUSED: "paused",
-    TopicStatus.BLOCKED: "blocked",
-    TopicStatus.COMPLETED: "completed",
+    ThreadStatus.PENDING: "pending",
+    ThreadStatus.IN_PROGRESS: "in_progress",
+    ThreadStatus.AWAITING_USER: "awaiting_user",
+    ThreadStatus.AWAITING_AGENT: "awaiting_agent",
+    ThreadStatus.AWAITING_VERIFICATION: "awaiting_verification",
+    ThreadStatus.PAUSED: "paused",
+    ThreadStatus.BLOCKED: "blocked",
+    ThreadStatus.COMPLETED: "completed",
 }
 
 
 @dataclass
-class TopicEvent:
+class ThreadEvent:
     """A single immutable entry in a topic's event log."""
 
     event_id: str = field(default_factory=lambda: str(uuid.uuid4()))
@@ -59,18 +59,18 @@ class TopicEvent:
         }
 
     @classmethod
-    def from_dict(cls, d: dict) -> TopicEvent:
+    def from_dict(cls, d: dict) -> ThreadEvent:
         return cls(**d)
 
 
 @dataclass
-class Topic:
+class Thread:
     """A tracked topic with status, progress, and an append-only event log."""
 
     topic_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     title: str = ""
     description: str = ""
-    status: TopicStatus = TopicStatus.PENDING
+    status: ThreadStatus = ThreadStatus.PENDING
     created_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
@@ -83,7 +83,7 @@ class Topic:
     done: list[str] = field(default_factory=list)
     pending: list[str] = field(default_factory=list)
     tool_calls: list[dict] = field(default_factory=list)  # all tool calls across this topic
-    events: list[TopicEvent] = field(default_factory=list)
+    events: list[ThreadEvent] = field(default_factory=list)
 
     # -- helpers ---------------------------------------------------------
 
@@ -96,9 +96,9 @@ class Topic:
         description: str,
         actor: str = "assistant",
         metadata: Optional[dict] = None,
-    ) -> TopicEvent:
+    ) -> ThreadEvent:
         """Append a new event to the log and return it."""
-        event = TopicEvent(
+        event = ThreadEvent(
             event_type=event_type,
             description=description,
             actor=actor,
@@ -110,7 +110,7 @@ class Topic:
 
     def set_status(
         self,
-        status: TopicStatus,
+        status: ThreadStatus,
         note: Optional[str] = None,
         actor: str = "assistant",
     ) -> None:
@@ -169,12 +169,12 @@ class Topic:
         }
 
     @classmethod
-    def from_dict(cls, d: dict) -> Topic:
+    def from_dict(cls, d: dict) -> Thread:
         return cls(
             topic_id=d["topic_id"],
             title=d["title"],
             description=d.get("description", ""),
-            status=TopicStatus(d["status"]),
+            status=ThreadStatus(d["status"]),
             created_at=d["created_at"],
             updated_at=d["updated_at"],
             tags=d.get("tags", []),
@@ -183,7 +183,7 @@ class Topic:
             done=d.get("done", []),
             pending=d.get("pending", []),
             tool_calls=d.get("tool_calls", []),
-            events=[TopicEvent.from_dict(e) for e in d.get("events", [])],
+            events=[ThreadEvent.from_dict(e) for e in d.get("events", [])],
         )
 
     def summary(self) -> str:
@@ -192,3 +192,6 @@ class Topic:
         if self.current_action:
             parts.append(f"— {self.current_action}")
         return " ".join(parts)
+
+# Backward compatibility alias
+Topic = Thread
