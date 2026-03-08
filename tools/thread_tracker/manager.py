@@ -29,10 +29,11 @@ class ThreadManager:
         title: str,
         description: str = "",
         tags: Optional[list[str]] = None,
+        original_request: str = None,
     ) -> Thread:
-        """Create a new topic and persist it."""
-        topic = Topic(title=title, description=description, tags=tags or [])
-        topic.add_event("created", f"Topic created: {title}")
+        """Create a new thread and persist it."""
+        topic = Topic(title=title, description=description, tags=tags or [], original_request=original_request)
+        topic.add_event("created", f"Thread created: {title}")
         self._topics[topic.topic_id] = topic
         self.save()
         return topic
